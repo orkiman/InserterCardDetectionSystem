@@ -11,7 +11,7 @@ CONFIG_FILE = "config.json"
 DEFAULT_CONFIG = {
     "serial_port": "",
     "baud_rate": 115200,
-    "cal_factor": 0.05,  # Default: roughly 1 ADC step = 0.05mm
+    "cal_factor": 0.01,  # Default: roughly 1 ADC step = 0.01mm
     "cal_offset": 43.0,  # Default: 0 ADC = 43mm (Base)
     "threshold_card": 50,
     "threshold_floor": 30
@@ -52,6 +52,7 @@ ser = None
 # --- SERIAL THREAD ---
 def serial_handler(page: ft.Page):
     global ser
+    last_ping = 0
     while True:
         with serial_lock:
             if state.config["serial_port"] and not state.connected:
@@ -89,8 +90,9 @@ def serial_handler(page: ft.Page):
                         state.last_event = f"STOP: {line.split(':')[1]}"
                         page.pubsub.send_all("update_event")
 
-                if int(time.time() * 10) % 10 == 0:
+                if time.time() - last_ping > 1.0:
                      ser.write(b"PING\n")
+                     last_ping = time.time()
 
             except Exception:
                 state.connected = False
