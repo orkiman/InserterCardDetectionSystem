@@ -1,0 +1,8 @@
+{
+    "serial_port": "COM4",
+    "baud_rate": 115200,
+    "cal_factor": 0.01,
+    "cal_offset": 0.0,
+    "threshold_card": 50,
+    "threshold_floor": 30
+}

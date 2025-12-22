@@ -1,5 +1,11 @@
 #include <Arduino.h>
 
+// --- FORWARD DECLARATIONS ---
+void validateResult();
+void triggerStop(String reason);
+void resetSystem();
+void processCommand(String cmd);
+
 // --- HARDWARE PIN DEFINITIONS ---
 const int PIN_SENSOR      = A0;  // Analog Height Sensor
 const int PIN_ENVELOPE    = 2;   // Digital Input: Envelope Present Signal
