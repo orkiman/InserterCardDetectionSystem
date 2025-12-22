@@ -43,7 +43,6 @@ class AppState:
             json.dump(self.config, f, indent=4)
 
     def get_mm(self, raw_adc):
-        # Linear Conversion: y = mx + c
         return (raw_adc * self.config["cal_factor"]) + self.config["cal_offset"]
 
 state = AppState()
@@ -60,18 +59,14 @@ def serial_handler(page: ft.Page):
                     ser = serial.Serial(state.config["serial_port"], state.config["baud_rate"], timeout=1)
                     state.connected = True
                     page.pubsub.send_all("update_status")
-                    print(f"Connected to {state.config['serial_port']}")
-                except Exception as e:
-                    print(f"Connection Error: {e}")
-                    time.sleep(2) # Wait before retry
+                except Exception:
+                    time.sleep(2)
 
         if state.connected and ser and ser.is_open:
             try:
-                # 1. Read Line
                 if ser.in_waiting:
                     line = ser.readline().decode('utf-8', errors='ignore').strip()
                     if line.startswith("D:"):
-                        # Format: D:512,1,0 (ADC, Env, Stop)
                         parts = line.split(":")[1].split(",")
                         if len(parts) >= 3:
                             state.raw_val = int(parts[0])
@@ -79,11 +74,9 @@ def serial_handler(page: ft.Page):
                             state.envelope_active = (parts[1] == "1")
                             state.stop_active = (parts[2] == "1")
                             
-                            # Update Graph Data
                             state.graph_points.append(ft.LineChartDataPoint(len(state.graph_points), state.raw_val))
                             if len(state.graph_points) > state.max_graph_points:
                                 state.graph_points.pop(0)
-                                # Re-index x axis to keep graph scrolling smoothly
                                 for i, p in enumerate(state.graph_points):
                                     p.x = i
                             
@@ -96,26 +89,22 @@ def serial_handler(page: ft.Page):
                         state.last_event = f"STOP: {line.split(':')[1]}"
                         page.pubsub.send_all("update_event")
 
-                # 2. Heartbeat (Every ~1s)
-                # Ideally handled by a separate timer, but simple loop logic here for now
-                if int(time.time() * 10) % 10 == 0: # Roughly every second
+                if int(time.time() * 10) % 10 == 0:
                      ser.write(b"PING\n")
 
-            except Exception as e:
-                print(f"Serial Error: {e}")
+            except Exception:
                 state.connected = False
                 if ser: ser.close()
                 page.pubsub.send_all("update_status")
 
-        time.sleep(0.05) # 20Hz loop
+        time.sleep(0.05)
 
 def send_command(cmd):
     with serial_lock:
         if state.connected and ser:
             try:
                 ser.write(f"{cmd}\n".encode())
-                print(f"Sent: {cmd}")
-            except:
+            except Exception:
                 pass
 
 # --- GUI MAIN ---
@@ -124,9 +113,7 @@ def main(page: ft.Page):
     page.theme_mode = ft.ThemeMode.DARK
     page.padding = 20
     
-    # --- UI ELEMENTS ---
-    
-    # 1. Status Bar
+    # UI Elements
     status_icon = ft.Icon(ft.Icons.CIRCLE, color=ft.Colors.RED, size=20)
     status_text = ft.Text("Disconnected", color=ft.Colors.RED)
     port_dropdown = ft.Dropdown(
@@ -145,13 +132,11 @@ def main(page: ft.Page):
     def update_port(port_name):
         state.config["serial_port"] = port_name
         state.save_config()
-        # Trigger reconnect logic in thread
         global ser
         if ser: ser.close()
         state.connected = False
         page.update()
 
-    # 2. Dashboard Elements
     lbl_mm = ft.Text("0.00 mm", size=60, weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE_200)
     lbl_raw = ft.Text("ADC: 0", size=20, color=ft.Colors.GREY_500)
     lbl_event = ft.Text("System Ready", size=25, weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN)
@@ -171,8 +156,7 @@ def main(page: ft.Page):
             labels=[ft.ChartAxisLabel(value=0, label=ft.Text("0")), ft.ChartAxisLabel(value=1023, label=ft.Text("1023"))],
             labels_size=40,
         ),
-        bottom_axis=ft.ChartAxis(labels_size=0), # Hide X labels
-        tooltip_bgcolor=ft.Colors.with_opacity(0.8, ft.Colors.GREY_900),
+        bottom_axis=ft.ChartAxis(labels_size=0),
         min_y=0,
         max_y=1023,
         min_x=0,
@@ -182,9 +166,6 @@ def main(page: ft.Page):
 
     btn_resume = ft.ElevatedButton("RESUME MACHINE", bgcolor=ft.Colors.RED, color=ft.Colors.WHITE, on_click=lambda _: send_command("RESUME"))
 
-    # 3. Settings / Calibration Elements
-    
-    # Sliders
     slider_threshold = ft.Slider(min=0, max=500, divisions=500, label="Threshold: {value}", value=state.config["threshold_card"])
     slider_floor = ft.Slider(min=0, max=200, divisions=200, label="Floor: {value}", value=state.config["threshold_floor"])
     
@@ -198,24 +179,20 @@ def main(page: ft.Page):
         page.snack_bar.open = True
         page.update()
 
-    # Calibration Inputs
     txt_factor = ft.TextField(label="Factor (m)", value=str(state.config["cal_factor"]), width=100)
     txt_offset = ft.TextField(label="Offset (c)", value=str(state.config["cal_offset"]), width=100)
     
-    # Wizard State
     cal_floor_val = 0
     cal_std_val = 0
     txt_std_thickness = ft.TextField(label="Piece Thickness (mm)", value="5.0", width=150)
     lbl_cal_step = ft.Text("Step 1: Clear Sensor area to measure floor.", color=ft.Colors.YELLOW)
 
     def run_cal_step1(e):
-        # Measure Floor
         if not (30 < state.raw_val < 100):
-            lbl_cal_step.value = f"Error: Sensor Value {state.raw_val} out of valid floor range (30-100)!"
+            lbl_cal_step.value = f"Error: Sensor Value {state.raw_val} out of range!"
             lbl_cal_step.color = ft.Colors.RED
             lbl_cal_step.update()
             return
-        
         nonlocal cal_floor_val
         cal_floor_val = state.raw_val
         lbl_cal_step.value = f"Floor Recorded: {cal_floor_val}. Step 2: Place Standard Piece."
@@ -225,62 +202,25 @@ def main(page: ft.Page):
         btn_cal_step2.update()
 
     def run_cal_step2(e):
-        # Measure Standard
         nonlocal cal_std_val
         cal_std_val = state.raw_val
-        
-        # Calculate
         try:
             thickness = float(txt_std_thickness.value)
             delta_adc = cal_std_val - cal_floor_val
-            
-            if delta_adc <= 5: # Too small difference
-                 lbl_cal_step.value = "Error: Delta too small. Is piece inserted?"
+            if delta_adc <= 5:
+                 lbl_cal_step.value = "Error: Delta too small."
                  lbl_cal_step.color = ft.Colors.RED
                  lbl_cal_step.update()
                  return
-
             new_factor = thickness / delta_adc
-            # Offset logic: Since y = mx + c. At floor (y=53mm approx? Or relative?)
-            # Actually, usually user wants 0mm at floor or specific distance.
-            # Let's assume user wants to measure Thickness. So Floor = 0mm thickness?
-            # Or Height? Let's assume Height. Floor = 53mm (bottom of range).
-            # Let's assume Floor is the MAX distance (53mm) or MIN?
-            # Usually Analog: Closer = Higher Voltage. 
-            # Let's stick to the prompt: Range 43-53mm.
-            # Let's assume Floor (Empty) = 53mm (Furthest). 
-            # Insert piece (5mm) -> Height = 48mm.
-            
-            # Simple approach requested: "Floor value" + "Standard Piece".
-            # Let's assume Floor is Reference 0 (or known Envelop Base).
-            # Let's set Offset so that Floor Reading = 0.0mm (Thickness Mode)
-            # OR Floor Reading = 53.0mm (Absolute Mode).
-            # Let's use Absolute Mode as per spec. 
-            
-            # If Floor = 53mm (Far). Piece (5mm) means Sensor sees 48mm.
-            # Voltage/ADC goes UP as object gets CLOSER usually (Sharp sensors).
-            # Let's assume: Higher ADC = Closer object = Smaller mm distance?
-            # OR Higher ADC = Higher Thickness?
-            # Let's trust the "Factor" approach.
-            
-            # Auto Calc:
-            # We want Floor to equal roughly 53mm (or whatever user defines base as).
-            # Let's just calculate Factor based on Thickness Delta.
-            # Factor = Thickness_mm / (ADC_Piece - ADC_Floor)
-            
             state.config["cal_factor"] = round(new_factor, 5)
-            # Recalculate offset so that Floor ADC = 0mm (Relative Thickness) or Fixed?
-            # Let's set it so current Floor ADC = 0.00mm (Relative to floor)
             state.config["cal_offset"] = -(cal_floor_val * new_factor)
-            
             txt_factor.value = str(state.config["cal_factor"])
             txt_offset.value = str(state.config["cal_offset"])
             state.save_config()
-            
             lbl_cal_step.value = f"Success! Factor: {new_factor:.4f}. Saved."
             lbl_cal_step.color = ft.Colors.GREEN
             lbl_cal_step.update()
-            
         except ValueError:
              lbl_cal_step.value = "Error: Invalid Thickness value."
              lbl_cal_step.update()
@@ -296,12 +236,9 @@ def main(page: ft.Page):
             page.snack_bar = ft.SnackBar(ft.Text("Calibration Saved"))
             page.snack_bar.open = True
             page.update()
-        except:
+        except Exception:
              pass
 
-    # --- LAYOUT CONSTRUCTION ---
-    
-    # TAB 1: DASHBOARD
     tab_dashboard = ft.Container(
         content=ft.Column([
             ft.Row([
@@ -333,26 +270,18 @@ def main(page: ft.Page):
         ])
     )
 
-    # TAB 2: SETTINGS & CALIBRATION
     tab_settings = ft.Column([
         ft.Text("Connection", size=20, weight=ft.FontWeight.BOLD),
         ft.Row([port_dropdown, ft.IconButton(ft.Icons.REFRESH, on_click=refresh_ports)]),
-        
         ft.Divider(),
-        
         ft.Text("Safety Thresholds", size=20, weight=ft.FontWeight.BOLD),
         slider_threshold,
         slider_floor,
         ft.ElevatedButton("Apply & Upload Thresholds", on_click=save_settings),
-        
         ft.Divider(),
-        
         ft.Text("Calibration (ADC to mm)", size=20, weight=ft.FontWeight.BOLD),
-        ft.Text("Manual Edit:", color=ft.Colors.GREY),
         ft.Row([txt_factor, txt_offset, ft.ElevatedButton("Save Manual", on_click=save_manual_cal)]),
-        
         ft.Container(height=10),
-        ft.Text("Calibration Wizard:", color=ft.Colors.GREY),
         ft.Container(
             content=ft.Column([
                 lbl_cal_step,
@@ -364,10 +293,8 @@ def main(page: ft.Page):
         )
     ], scroll=ft.ScrollMode.AUTO)
 
-    # Main Tabs
     t = ft.Tabs(
         selected_index=0,
-        animation_duration=300,
         tabs=[
             ft.Tab(text="Monitor", icon=ft.Icons.DASHBOARD, content=tab_dashboard),
             ft.Tab(text="Configuration", icon=ft.Icons.SETTINGS, content=tab_settings),
@@ -380,34 +307,31 @@ def main(page: ft.Page):
         t
     )
     
-    # --- EVENT LISTENERS ---
-    def on_status_update(topic, msg):
+    # --- PubSub Callbacks (Latest Flet API) ---
+    def on_status_update(message):
         status_icon.color = ft.Colors.GREEN if state.connected else ft.Colors.RED
         status_text.value = "Connected" if state.connected else "Disconnected"
         status_text.color = ft.Colors.GREEN if state.connected else ft.Colors.RED
         status_icon.update()
         status_text.update()
         
-    def on_data_update(topic, msg):
+    def on_data_update(message):
         lbl_mm.value = f"{state.mm_val:.2f} mm"
         lbl_raw.value = f"ADC: {state.raw_val}"
         lbl_mm.update()
         lbl_raw.update()
-        # Chart update is expensive, maybe throttle? Flet handles it okay usually.
         chart.update()
         
-    def on_event_update(topic, msg):
+    def on_event_update(message):
         lbl_event.value = state.last_event
         lbl_event.color = ft.Colors.RED if "STOP" in state.last_event else ft.Colors.GREEN
         lbl_event.update()
 
-    page.pubsub.subscribe("update_status", on_status_update)
-    page.pubsub.subscribe("new_data", on_data_update)
-    page.pubsub.subscribe("update_event", on_event_update)
+    page.pubsub.subscribe(on_status_update)
+    page.pubsub.subscribe(on_data_update)
+    page.pubsub.subscribe(on_event_update)
 
-    # Init
     refresh_ports()
-    # Start Serial Thread
     threading.Thread(target=serial_handler, args=(page,), daemon=True).start()
 
 ft.app(target=main)
