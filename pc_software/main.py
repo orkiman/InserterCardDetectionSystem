@@ -5,16 +5,17 @@ import threading
 import time
 import json
 import os
+from datetime import datetime
 
 # --- CONFIGURATION & STATE ---
 CONFIG_FILE = "config.json"
+ERROR_LOG_FILE = "error_log.txt"
 DEFAULT_CONFIG = {
     "serial_port": "",
     "baud_rate": 115200,
-    "cal_factor": 0.01,  # Default: roughly 1 ADC step = 0.01mm
-    "cal_offset": 43.0,  # Default: 0 ADC = 43mm (Base)
-    "threshold_card": 50,
-    "threshold_floor": 30
+    "floor_value": 100,  # ADC value for floor (50-500)
+    "factor": 0.01,  # Manual conversion factor
+    "envelope_card_threshold": 150  # ADC threshold below which envelope is empty
 }
 
 class AppState:
@@ -26,14 +27,36 @@ class AppState:
         self.envelope_active = False
         self.stop_active = False
         self.last_event = "System Ready"
+        self.last_error = ""  # Keep track of last error until resume
+        self.error_history = []  # List of recent errors (timestamp, message)
+        self.max_error_history = 10
         self.graph_points = []
         self.max_graph_points = 50
+        self.floor_error = False
+        self.graph_min = 0
+        self.graph_max = 1023
 
     def load_config(self):
         if os.path.exists(CONFIG_FILE):
             try:
                 with open(CONFIG_FILE, 'r') as f:
-                    return json.load(f)
+                    loaded_config = json.load(f)
+
+                    # Migrate old config keys to new format
+                    if "cal_factor" in loaded_config or "cal_offset" in loaded_config:
+                        # Old config detected, migrate to new format
+                        new_config = DEFAULT_CONFIG.copy()
+                        new_config["serial_port"] = loaded_config.get("serial_port", "")
+                        new_config["baud_rate"] = loaded_config.get("baud_rate", 115200)
+                        # Keep old factor if it exists, otherwise use default
+                        if "cal_factor" in loaded_config:
+                            new_config["factor"] = loaded_config["cal_factor"]
+                        return new_config
+
+                    # New config format - ensure all keys exist
+                    config = DEFAULT_CONFIG.copy()
+                    config.update(loaded_config)
+                    return config
             except:
                 pass
         return DEFAULT_CONFIG.copy()
@@ -42,8 +65,34 @@ class AppState:
         with open(CONFIG_FILE, 'w') as f:
             json.dump(self.config, f, indent=4)
 
+    def log_error(self, error_msg):
+        """Log error to file and add to history"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_entry = f"[{timestamp}] {error_msg}"
+
+        # Add to history (keep last N errors)
+        self.error_history.insert(0, (timestamp, error_msg))
+        if len(self.error_history) > self.max_error_history:
+            self.error_history.pop()
+
+        # Write to log file
+        try:
+            with open(ERROR_LOG_FILE, 'a') as f:
+                f.write(log_entry + '\n')
+        except:
+            pass
+
     def get_mm(self, raw_adc):
-        return (raw_adc * self.config["cal_factor"]) + self.config["cal_offset"]
+        # Check if sensor is out of range
+        if raw_adc < self.config["floor_value"] - 50 or raw_adc > self.config["floor_value"] + 450:
+            self.floor_error = True
+            return 0.0
+        else:
+            self.floor_error = False
+
+        # Calculate height: (raw_adc - floor) * factor
+        # When raw_adc equals floor_value, height = 0
+        return (raw_adc - self.config["floor_value"]) * self.config["factor"]
 
 state = AppState()
 serial_lock = threading.Lock()
@@ -60,6 +109,12 @@ def serial_handler(page: ft.Page):
                     ser = serial.Serial(state.config["serial_port"], state.config["baud_rate"], timeout=1)
                     state.connected = True
                     page.pubsub.send_all("update_status")
+
+                    # Send configuration to Arduino on connect
+                    time.sleep(0.5)  # Wait for Arduino to boot
+                    ser.write(f"SET_FLOOR:{state.config['floor_value']}\n".encode())
+                    time.sleep(0.1)
+                    ser.write(f"SET_THR:{state.config['envelope_card_threshold']}\n".encode())
                 except Exception:
                     time.sleep(2)
 
@@ -74,21 +129,31 @@ def serial_handler(page: ft.Page):
                             state.mm_val = state.get_mm(state.raw_val)
                             state.envelope_active = (parts[1] == "1")
                             state.stop_active = (parts[2] == "1")
-                            
+
+                            # Update auto-scaling min/max for graph
+                            if len(state.graph_points) > 0:
+                                raw_values = [p.y for p in state.graph_points]
+                                state.graph_min = min(raw_values + [state.raw_val])
+                                state.graph_max = max(raw_values + [state.raw_val])
+
                             state.graph_points.append(ft.LineChartDataPoint(len(state.graph_points), state.raw_val))
                             if len(state.graph_points) > state.max_graph_points:
                                 state.graph_points.pop(0)
                                 for i, p in enumerate(state.graph_points):
                                     p.x = i
-                            
+
                             page.pubsub.send_all("new_data")
 
                     elif line.startswith("EVT:PASS"):
                         state.last_event = "PASS OK"
                         page.pubsub.send_all("update_event")
                     elif line.startswith("ERR:"):
-                        state.last_event = f"STOP: {line.split(':')[1]}"
+                        error_msg = line.split(':', 1)[1] if ':' in line else line
+                        state.last_error = f"STOP: {error_msg}"
+                        state.last_event = state.last_error
+                        state.log_error(error_msg)
                         page.pubsub.send_all("update_event")
+                        page.pubsub.send_all("update_error_history")
 
                 if time.time() - last_ping > 1.0:
                      ser.write(b"PING\n")
@@ -141,6 +206,7 @@ def main(page: ft.Page):
 
     lbl_mm = ft.Text("0.00 mm", size=60, weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE_200)
     lbl_raw = ft.Text("ADC: 0", size=20, color=ft.Colors.GREY_500)
+    lbl_error = ft.Text("", size=16, color=ft.Colors.RED, visible=False)
     lbl_event = ft.Text("System Ready", size=25, weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN)
     
     chart_data = [ft.LineChartData(
@@ -155,7 +221,10 @@ def main(page: ft.Page):
         data_series=chart_data,
         border=ft.border.all(1, ft.Colors.WHITE10),
         left_axis=ft.ChartAxis(
-            labels=[ft.ChartAxisLabel(value=0, label=ft.Text("0")), ft.ChartAxisLabel(value=1023, label=ft.Text("1023"))],
+            labels=[
+                ft.ChartAxisLabel(value=0, label=ft.Text("Min")),
+                ft.ChartAxisLabel(value=1023, label=ft.Text("Max"))
+            ],
             labels_size=40,
         ),
         bottom_axis=ft.ChartAxis(labels_size=0),
@@ -166,80 +235,102 @@ def main(page: ft.Page):
         expand=True,
     )
 
-    btn_resume = ft.ElevatedButton("RESUME MACHINE", bgcolor=ft.Colors.RED, color=ft.Colors.WHITE, on_click=lambda _: send_command("RESUME"))
+    def on_resume_clicked(_):
+        send_command("RESUME")
+        state.last_error = ""
+        state.last_event = "System Ready"
+        page.pubsub.send_all("update_event")
 
-    slider_threshold = ft.Slider(min=0, max=500, divisions=500, label="Threshold: {value}", value=state.config["threshold_card"])
-    slider_floor = ft.Slider(min=0, max=200, divisions=200, label="Floor: {value}", value=state.config["threshold_floor"])
-    
+    btn_resume = ft.ElevatedButton(
+        "RESUME MACHINE",
+        bgcolor=ft.Colors.GREEN,
+        color=ft.Colors.WHITE,
+        on_click=on_resume_clicked
+    )
+
+    # New simplified configuration fields
+    txt_floor = ft.TextField(
+        label="Floor Value (ADC: 50-500)",
+        value=str(state.config["floor_value"]),
+        width=200,
+        helper_text="ADC value when nothing is on sensor"
+    )
+    txt_factor = ft.TextField(
+        label="Conversion Factor",
+        value=str(state.config["factor"]),
+        width=200,
+        helper_text="Multiply by (ADC - Floor) to get mm"
+    )
+    txt_threshold = ft.TextField(
+        label="Envelope + Card Threshold (ADC)",
+        value=str(state.config["envelope_card_threshold"]),
+        width=200,
+        helper_text="Below this = empty envelope (error)"
+    )
+    lbl_config_status = ft.Text("", color=ft.Colors.GREEN)
+
     def save_settings(e):
-        state.config["threshold_card"] = int(slider_threshold.value)
-        state.config["threshold_floor"] = int(slider_floor.value)
-        state.save_config()
-        send_command(f"SET_THR:{state.config['threshold_card']}")
-        send_command(f"SET_MIN:{state.config['threshold_floor']}")
-        page.snack_bar = ft.SnackBar(ft.Text("Settings Saved & Uploaded"))
-        page.snack_bar.open = True
-        page.update()
-
-    txt_factor = ft.TextField(label="Factor (m)", value=str(state.config["cal_factor"]), width=100)
-    txt_offset = ft.TextField(label="Offset (c)", value=str(state.config["cal_offset"]), width=100)
-    
-    cal_floor_val = 0
-    cal_std_val = 0
-    txt_std_thickness = ft.TextField(label="Piece Thickness (mm)", value="5.0", width=150)
-    lbl_cal_step = ft.Text("Step 1: Clear Sensor area to measure floor.", color=ft.Colors.YELLOW)
-
-    def run_cal_step1(e):
-        if not (30 < state.raw_val < 100):
-            lbl_cal_step.value = f"Error: Sensor Value {state.raw_val} out of range!"
-            lbl_cal_step.color = ft.Colors.RED
-            lbl_cal_step.update()
-            return
-        nonlocal cal_floor_val
-        cal_floor_val = state.raw_val
-        lbl_cal_step.value = f"Floor Recorded: {cal_floor_val}. Step 2: Place Standard Piece."
-        lbl_cal_step.color = ft.Colors.CYAN
-        lbl_cal_step.update()
-        btn_cal_step2.disabled = False
-        btn_cal_step2.update()
-
-    def run_cal_step2(e):
-        nonlocal cal_std_val
-        cal_std_val = state.raw_val
         try:
-            thickness = float(txt_std_thickness.value)
-            delta_adc = cal_std_val - cal_floor_val
-            if delta_adc <= 5:
-                 lbl_cal_step.value = "Error: Delta too small."
-                 lbl_cal_step.color = ft.Colors.RED
-                 lbl_cal_step.update()
-                 return
-            new_factor = thickness / delta_adc
-            state.config["cal_factor"] = round(new_factor, 5)
-            state.config["cal_offset"] = -(cal_floor_val * new_factor)
-            txt_factor.value = str(state.config["cal_factor"])
-            txt_offset.value = str(state.config["cal_offset"])
-            state.save_config()
-            lbl_cal_step.value = f"Success! Factor: {new_factor:.4f}. Saved."
-            lbl_cal_step.color = ft.Colors.GREEN
-            lbl_cal_step.update()
-        except ValueError:
-             lbl_cal_step.value = "Error: Invalid Thickness value."
-             lbl_cal_step.update()
+            floor_val = int(txt_floor.value)
+            # Validate floor range
+            if floor_val < 50 or floor_val > 500:
+                lbl_config_status.value = "ERROR: Floor must be between 50-500"
+                lbl_config_status.color = ft.Colors.RED
+                lbl_config_status.update()
+                return
 
-    btn_cal_step1 = ft.ElevatedButton("1. Measure Floor", on_click=run_cal_step1)
-    btn_cal_step2 = ft.ElevatedButton("2. Measure Piece", on_click=run_cal_step2, disabled=True)
+            factor_val = float(txt_factor.value)
+            threshold_val = int(txt_threshold.value)
 
-    def save_manual_cal(e):
-        try:
-            state.config["cal_factor"] = float(txt_factor.value)
-            state.config["cal_offset"] = float(txt_offset.value)
+            state.config["floor_value"] = floor_val
+            state.config["factor"] = factor_val
+            state.config["envelope_card_threshold"] = threshold_val
             state.save_config()
-            page.snack_bar = ft.SnackBar(ft.Text("Calibration Saved"))
+
+            # Send to Arduino
+            send_command(f"SET_FLOOR:{floor_val}")
+            send_command(f"SET_THR:{threshold_val}")
+
+            lbl_config_status.value = "Settings Saved & Uploaded"
+            lbl_config_status.color = ft.Colors.GREEN
+            lbl_config_status.update()
+
+            page.snack_bar = ft.SnackBar(ft.Text("Settings Saved & Uploaded"))
             page.snack_bar.open = True
             page.update()
-        except Exception:
-             pass
+        except ValueError:
+            lbl_config_status.value = "ERROR: Invalid input values"
+            lbl_config_status.color = ft.Colors.RED
+            lbl_config_status.update()
+
+    # Error history display
+    error_list = ft.Column([], spacing=5, scroll=ft.ScrollMode.AUTO, height=150)
+
+    def update_error_list():
+        error_list.controls.clear()
+        if not state.error_history:
+            error_list.controls.append(
+                ft.Text("No errors logged", size=12, color=ft.Colors.GREY_600, italic=True)
+            )
+        else:
+            for timestamp, error_msg in state.error_history:
+                error_list.controls.append(
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Text(timestamp, size=10, color=ft.Colors.GREY_500, width=140),
+                            ft.Text(error_msg, size=11, color=ft.Colors.RED_300),
+                        ]),
+                        padding=5,
+                        bgcolor=ft.Colors.with_opacity(0.05, ft.Colors.RED),
+                        border_radius=5,
+                    )
+                )
+        try:
+            error_list.update()
+        except:
+            pass  # Control not yet added to page
+
+    update_error_list()
 
     tab_dashboard = ft.Container(
         content=ft.Column([
@@ -248,7 +339,8 @@ def main(page: ft.Page):
                     content=ft.Column([
                         ft.Text("CURRENT HEIGHT", size=12, color=ft.Colors.GREY_400),
                         lbl_mm,
-                        lbl_raw
+                        lbl_raw,
+                        lbl_error
                     ]),
                     expand=True,
                 ),
@@ -264,8 +356,16 @@ def main(page: ft.Page):
             ft.Text("LIVE SENSOR DATA", size=12, weight=ft.FontWeight.BOLD),
             ft.Container(
                 content=chart,
-                height=300,
+                height=250,
                 bgcolor=ft.Colors.with_opacity(0.05, ft.Colors.WHITE),
+                border_radius=10,
+                padding=10
+            ),
+            ft.Container(height=10),
+            ft.Text("ERROR HISTORY (Last 10)", size=12, weight=ft.FontWeight.BOLD),
+            ft.Container(
+                content=error_list,
+                bgcolor=ft.Colors.with_opacity(0.02, ft.Colors.WHITE),
                 border_radius=10,
                 padding=10
             )
@@ -276,23 +376,22 @@ def main(page: ft.Page):
         ft.Text("Connection", size=20, weight=ft.FontWeight.BOLD),
         ft.Row([port_dropdown, ft.IconButton(ft.Icons.REFRESH, on_click=refresh_ports)]),
         ft.Divider(),
-        ft.Text("Safety Thresholds", size=20, weight=ft.FontWeight.BOLD),
-        slider_threshold,
-        slider_floor,
-        ft.ElevatedButton("Apply & Upload Thresholds", on_click=save_settings),
-        ft.Divider(),
-        ft.Text("Calibration (ADC to mm)", size=20, weight=ft.FontWeight.BOLD),
-        ft.Row([txt_factor, txt_offset, ft.ElevatedButton("Save Manual", on_click=save_manual_cal)]),
+        ft.Text("Sensor Configuration", size=20, weight=ft.FontWeight.BOLD),
         ft.Container(height=10),
-        ft.Container(
-            content=ft.Column([
-                lbl_cal_step,
-                ft.Row([btn_cal_step1, txt_std_thickness, btn_cal_step2])
-            ]),
-            bgcolor=ft.Colors.with_opacity(0.1, ft.Colors.BLUE),
-            padding=15,
-            border_radius=10
-        )
+        txt_floor,
+        ft.Text("Set the ADC value when sensor reads the base/floor (nothing on it). Valid range: 50-500",
+                size=12, color=ft.Colors.GREY_500),
+        ft.Container(height=15),
+        txt_factor,
+        ft.Text("Manual conversion factor to convert ADC units to mm",
+                size=12, color=ft.Colors.GREY_500),
+        ft.Container(height=15),
+        txt_threshold,
+        ft.Text("Maximum ADC value for empty envelope detection (triggers error if below)",
+                size=12, color=ft.Colors.GREY_500),
+        ft.Container(height=20),
+        ft.ElevatedButton("Save & Apply Configuration", on_click=save_settings, bgcolor=ft.Colors.BLUE),
+        lbl_config_status,
     ], scroll=ft.ScrollMode.AUTO)
 
     t = ft.Tabs(
@@ -318,20 +417,49 @@ def main(page: ft.Page):
         status_text.update()
         
     def on_data_update(message):
-        lbl_mm.value = f"{state.mm_val:.2f} mm"
+        if state.floor_error:
+            lbl_mm.value = "0.00 mm"
+            lbl_error.value = "ERROR: Sensor out of range - please adjust"
+            lbl_error.visible = True
+        else:
+            lbl_mm.value = f"{state.mm_val:.2f} mm"
+            lbl_error.visible = False
+
         lbl_raw.value = f"ADC: {state.raw_val}"
         lbl_mm.update()
         lbl_raw.update()
+        lbl_error.update()
+
+        # Update chart with auto-scaling
+        if len(state.graph_points) > 0:
+            chart.min_y = max(0, state.graph_min - 10)
+            chart.max_y = min(1023, state.graph_max + 10)
+            chart.left_axis.labels = [
+                ft.ChartAxisLabel(value=chart.min_y, label=ft.Text(f"{int(chart.min_y)}")),
+                ft.ChartAxisLabel(value=chart.max_y, label=ft.Text(f"{int(chart.max_y)}"))
+            ]
         chart.update()
         
     def on_event_update(message):
-        lbl_event.value = state.last_event
-        lbl_event.color = ft.Colors.RED if "STOP" in state.last_event else ft.Colors.GREEN
+        # If there's a last error and machine is stopped, keep showing it
+        if state.last_error and state.stop_active:
+            lbl_event.value = state.last_error
+            lbl_event.color = ft.Colors.RED
+            btn_resume.bgcolor = ft.Colors.RED
+        else:
+            lbl_event.value = state.last_event
+            lbl_event.color = ft.Colors.RED if "STOP" in state.last_event else ft.Colors.GREEN
+            btn_resume.bgcolor = ft.Colors.GREEN
         lbl_event.update()
+        btn_resume.update()
+
+    def on_error_history_update(_):
+        update_error_list()
 
     page.pubsub.subscribe(on_status_update)
     page.pubsub.subscribe(on_data_update)
     page.pubsub.subscribe(on_event_update)
+    page.pubsub.subscribe(on_error_history_update)
 
     refresh_ports()
     threading.Thread(target=serial_handler, args=(page,), daemon=True).start()

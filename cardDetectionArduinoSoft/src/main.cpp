@@ -14,8 +14,8 @@ const int PIN_READY_OUT   = 9;   // Digital Output: System Heartbeat/Ready LED
 
 // --- CONFIGURATION CONSTANTS (DEFAULTS) ---
 // These can be updated via Serial commands
-int CFG_CARD_THRESHOLD    = 50;  // Delta needed to confirm card (e.g., +50 ADC steps)
-int CFG_BASE_FLOOR        = 30;  // Minimum valid sensor value (detects broken wire)
+int CFG_FLOOR_VALUE       = 100; // Floor ADC value (50-500 valid range)
+int CFG_CARD_THRESHOLD    = 150; // Below this = empty envelope (error)
 const long WATCHDOG_TIMEOUT = 2000; // Time in ms before stopping if no PC Ping
 
 // --- SIGNAL FILTERING ---
@@ -92,10 +92,10 @@ void loop() {
     }
   }
 
-  // B. Sensor Health (Broken Wire Check)
-  if (sensorValue < CFG_BASE_FLOOR) {
+  // B. Sensor Range Check (50-500 valid range around floor)
+  if (sensorValue < (CFG_FLOOR_VALUE - 50) || sensorValue > (CFG_FLOOR_VALUE + 450)) {
     if (!machineStopActive) {
-      triggerStop("ERR:SENSOR_FAULT_LOW");
+      triggerStop("ERR:SENSOR_OUT_OF_RANGE");
     }
   }
 
@@ -180,15 +180,14 @@ void loop() {
 // ------------------------------------------------------------
 
 void validateResult() {
-  // Logic: Did we see a peak high enough to be a card?
-  // Note: We are comparing absolute ADC value against a configured Threshold.
-  // Ideally, Threshold should be (BaseFloor + ThicknessDelta).
-  
+  // Logic: Check if peak is above threshold
+  // If below threshold = empty envelope (no card)
+
   if (maxPeakInWindow >= CFG_CARD_THRESHOLD) {
     // PASS: Card detected
-    Serial.println("EVT:PASS"); 
+    Serial.println("EVT:PASS");
   } else {
-    // FAIL: Peak was too low (Empty Envelope)
+    // FAIL: Peak was below threshold (Empty Envelope)
     triggerStop("ERR:EMPTY_ENVELOPE");
   }
 }
@@ -228,23 +227,25 @@ void processCommand(String cmd) {
     return;
   }
 
-  // Configuration: Set Threshold (e.g., "SET_THR:600")
+  // Configuration: Set Threshold (e.g., "SET_THR:150")
   if (cmd.startsWith("SET_THR:")) {
     int val = cmd.substring(8).toInt();
-    if (val > 0 && val < 1023) {
+    if (val > 0 && val <= 1023) {
       CFG_CARD_THRESHOLD = val;
-      Serial.print("MSG:Threshold Set to ");
+      Serial.print("MSG:Card Threshold Set to ");
       Serial.println(CFG_CARD_THRESHOLD);
     }
   }
 
-  // Configuration: Set Floor (e.g., "SET_MIN:25")
-  if (cmd.startsWith("SET_MIN:")) {
-    int val = cmd.substring(8).toInt();
-    if (val > 0 && val < 1023) {
-      CFG_BASE_FLOOR = val;
-      Serial.print("MSG:Floor Set to ");
-      Serial.println(CFG_BASE_FLOOR);
+  // Configuration: Set Floor Value (e.g., "SET_FLOOR:100")
+  if (cmd.startsWith("SET_FLOOR:")) {
+    int val = cmd.substring(10).toInt();
+    if (val >= 50 && val <= 500) {
+      CFG_FLOOR_VALUE = val;
+      Serial.print("MSG:Floor Value Set to ");
+      Serial.println(CFG_FLOOR_VALUE);
+    } else {
+      Serial.println("ERR:Floor must be 50-500");
     }
   }
 }
