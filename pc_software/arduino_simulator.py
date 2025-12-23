@@ -9,6 +9,7 @@ class ArduinoSimulator:
         # Configuration
         self.cfg_floor_value = 100
         self.cfg_card_threshold = 150
+        self.cfg_reverse_sensor = False
 
         # State
         self.running = True
@@ -28,9 +29,14 @@ class ArduinoSimulator:
         """Send data in Arduino format: D:ADC,envelope,stop"""
         if self.port and self.port.is_open:
             try:
+                # Apply reversal if configured
+                adc_value = self.manual_adc
+                if self.cfg_reverse_sensor:
+                    adc_value = 1023 - adc_value
+
                 envelope_val = 1 if self.envelope_present else 0
                 stop_val = 1 if self.machine_stop_active else 0
-                msg = f"D:{self.manual_adc},{envelope_val},{stop_val}\n"
+                msg = f"D:{adc_value},{envelope_val},{stop_val}\n"
                 self.port.write(msg.encode())
             except Exception as e:
                 print(f"Send error: {e}")
@@ -69,6 +75,12 @@ class ArduinoSimulator:
             if 0 <= val <= 1023:
                 self.cfg_floor_value = val
                 self.send_message(f"MSG:Floor Value Set to {val}")
+
+        if cmd.startswith("SET_REVERSE:"):
+            val = int(cmd.split(":")[1])
+            self.cfg_reverse_sensor = (val == 1)
+            status = "Enabled" if self.cfg_reverse_sensor else "Disabled"
+            self.send_message(f"MSG:Reverse Sensor {status}")
 
     def simulate_logic(self):
         """Simulate Arduino state machine logic"""
@@ -290,7 +302,8 @@ def main(page: ft.Page):
 
     def update_config():
         while sim.running:
-            lbl_config.value = f"Floor: {sim.cfg_floor_value} | Threshold: {sim.cfg_card_threshold}"
+            reverse_str = "ON" if sim.cfg_reverse_sensor else "OFF"
+            lbl_config.value = f"Floor: {sim.cfg_floor_value} | Threshold: {sim.cfg_card_threshold} | Reverse: {reverse_str}"
             try:
                 lbl_config.update()
             except:

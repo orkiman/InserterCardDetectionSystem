@@ -116,6 +116,9 @@ def serial_handler(page: ft.Page):
                     ser.write(f"SET_FLOOR:{state.config['floor_value']}\n".encode())
                     time.sleep(0.1)
                     ser.write(f"SET_THR:{state.config['envelope_card_threshold']}\n".encode())
+                    time.sleep(0.1)
+                    reverse_val = 1 if state.config.get('reverse_sensor', False) else 0
+                    ser.write(f"SET_REVERSE:{reverse_val}\n".encode())
                 except Exception:
                     time.sleep(2)
 
@@ -126,12 +129,8 @@ def serial_handler(page: ft.Page):
                     if line.startswith("D:"):
                         parts = line.split(":")[1].split(",")
                         if len(parts) >= 3:
-                            raw_adc = int(parts[0])
-                            # Apply reverse sensor if enabled
-                            if state.config.get("reverse_sensor", False):
-                                state.raw_val = 1023 - raw_adc
-                            else:
-                                state.raw_val = raw_adc
+                            # Arduino handles reversal, we just receive the value
+                            state.raw_val = int(parts[0])
                             state.mm_val = state.get_mm(state.raw_val)
                             state.envelope_active = (parts[1] == "1")
                             state.stop_active = (parts[2] == "1")
@@ -254,29 +253,32 @@ def main(page: ft.Page):
         on_click=on_resume_clicked
     )
 
-    # New simplified configuration fields
+    # Configuration fields
+    txt_threshold = ft.TextField(
+        label="Envelope + Card Threshold (ADC)",
+        value=str(state.config["envelope_card_threshold"]),
+        width=250,
+        helper_text="Below this = empty envelope (error)"
+    )
+    chk_reverse = ft.Checkbox(
+        label="Reverse Sensor Signal (1023 - ADC)",
+        value=state.config.get("reverse_sensor", False)
+    )
+
+    # Display-only parameters (don't affect validation logic)
     txt_floor = ft.TextField(
         label="Floor Value (ADC)",
         value=str(state.config["floor_value"]),
-        width=200,
+        width=250,
         helper_text="ADC value when nothing is on sensor"
     )
     txt_factor = ft.TextField(
         label="Conversion Factor",
         value=str(state.config["factor"]),
-        width=200,
+        width=250,
         helper_text="Multiply by (ADC - Floor) to get mm"
     )
-    txt_threshold = ft.TextField(
-        label="Envelope + Card Threshold (ADC)",
-        value=str(state.config["envelope_card_threshold"]),
-        width=200,
-        helper_text="Below this = empty envelope (error)"
-    )
-    chk_reverse = ft.Checkbox(
-        label="Reverse Sensor Installation (1023 - ADC)",
-        value=state.config.get("reverse_sensor", False)
-    )
+
     lbl_config_status = ft.Text("", color=ft.Colors.GREEN)
 
     def save_settings(e):
@@ -294,6 +296,7 @@ def main(page: ft.Page):
             # Send to Arduino
             send_command(f"SET_FLOOR:{floor_val}")
             send_command(f"SET_THR:{threshold_val}")
+            send_command(f"SET_REVERSE:{1 if chk_reverse.value else 0}")
 
             lbl_config_status.value = "Settings Saved & Uploaded"
             lbl_config_status.color = ft.Colors.GREEN
@@ -380,16 +383,9 @@ def main(page: ft.Page):
         ft.Text("Connection", size=20, weight=ft.FontWeight.BOLD),
         ft.Row([port_dropdown, ft.IconButton(ft.Icons.REFRESH, on_click=refresh_ports)]),
         ft.Divider(),
-        ft.Text("Sensor Configuration", size=20, weight=ft.FontWeight.BOLD),
+
+        ft.Text("Validation Logic", size=20, weight=ft.FontWeight.BOLD),
         ft.Container(height=10),
-        txt_floor,
-        ft.Text("Set the ADC value when sensor reads the base/floor (nothing on it)",
-                size=12, color=ft.Colors.GREY_500),
-        ft.Container(height=15),
-        txt_factor,
-        ft.Text("Manual conversion factor to convert ADC units to mm",
-                size=12, color=ft.Colors.GREY_500),
-        ft.Container(height=15),
         txt_threshold,
         ft.Text("Maximum ADC value for empty envelope detection (triggers error if below)",
                 size=12, color=ft.Colors.GREY_500),
@@ -397,6 +393,30 @@ def main(page: ft.Page):
         chk_reverse,
         ft.Text("Enable if sensor is installed upside-down (inverts ADC reading)",
                 size=12, color=ft.Colors.GREY_500),
+
+        ft.Container(height=20),
+        ft.Divider(),
+
+        ft.Text("Display Parameters", size=20, weight=ft.FontWeight.BOLD),
+        ft.Text("(For visualization only - do not affect validation)",
+                size=11, color=ft.Colors.GREY_600, italic=True),
+        ft.Container(height=5),
+        ft.Container(
+            content=ft.Column([
+                txt_floor,
+                ft.Text("Set the ADC value when sensor reads the base/floor (nothing on it)",
+                        size=12, color=ft.Colors.GREY_500),
+                ft.Container(height=15),
+                txt_factor,
+                ft.Text("Manual conversion factor to convert ADC units to mm",
+                        size=12, color=ft.Colors.GREY_500),
+            ]),
+            padding=15,
+            border=ft.border.all(2, ft.Colors.BLUE_GREY_700),
+            border_radius=10,
+            bgcolor=ft.Colors.with_opacity(0.03, ft.Colors.BLUE_GREY)
+        ),
+
         ft.Container(height=20),
         ft.ElevatedButton("Save & Apply Configuration", on_click=save_settings, bgcolor=ft.Colors.BLUE),
         lbl_config_status,

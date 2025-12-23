@@ -15,6 +15,7 @@ const int PIN_STOP_OUT    = 8;   // Digital Output: Machine Stop Trigger
 // These can be updated via Serial commands
 int CFG_FLOOR_VALUE       = 100; // Floor ADC value (50-500 valid range)
 int CFG_CARD_THRESHOLD    = 150; // Below this = empty envelope (error)
+bool CFG_REVERSE_SENSOR   = false; // Reverse sensor signal (1023 - ADC)
 const long WATCHDOG_TIMEOUT = 2000; // Time in ms before stopping if no PC Ping
 
 // --- SIGNAL FILTERING ---
@@ -75,6 +76,10 @@ void loop() {
   // 1. READ & FILTER SENSOR
   // ============================================================
   int rawValue = analogRead(PIN_SENSOR);
+  // Apply reversal if configured (for upside-down sensor installation)
+  if (CFG_REVERSE_SENSOR) {
+    rawValue = 1023 - rawValue;
+  }
   // EMA Filter: New = (Alpha * Raw) + ((1-Alpha) * Old)
   filteredValue = (FILTER_ALPHA * rawValue) + ((1.0 - FILTER_ALPHA) * filteredValue);
   int sensorValue = (int)filteredValue;
@@ -240,5 +245,13 @@ void processCommand(String cmd) {
       Serial.print("MSG:Floor Value Set to ");
       Serial.println(CFG_FLOOR_VALUE);
     }
+  }
+
+  // Configuration: Set Reverse Sensor (e.g., "SET_REVERSE:1")
+  if (cmd.startsWith("SET_REVERSE:")) {
+    int val = cmd.substring(12).toInt();
+    CFG_REVERSE_SENSOR = (val == 1);
+    Serial.print("MSG:Reverse Sensor ");
+    Serial.println(CFG_REVERSE_SENSOR ? "Enabled" : "Disabled");
   }
 }
