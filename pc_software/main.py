@@ -107,12 +107,30 @@ def serial_handler(page: ft.Page):
         with serial_lock:
             if state.config["serial_port"] and not state.connected:
                 try:
+                    # Open serial port
                     ser = serial.Serial(state.config["serial_port"], state.config["baud_rate"], timeout=1)
+
+                    # Toggle DTR to reset Arduino and clear all buffers
+                    ser.dtr = False
+                    time.sleep(0.1)
+                    ser.dtr = True
+
+                    # Wait for Arduino to reboot
+                    time.sleep(2.0)
+
+                    # Now flush everything - Arduino has restarted with clean state
+                    ser.reset_input_buffer()
+                    ser.reset_output_buffer()
+
+                    # Clear graph data for fresh start
+                    state.graph_points.clear()
+                    state.graph_min = 0
+                    state.graph_max = 1023
+
                     state.connected = True
                     page.pubsub.send_all("update_status")
 
                     # Send configuration to Arduino on connect
-                    time.sleep(0.5)  # Wait for Arduino to boot
                     ser.write(f"SET_FLOOR:{state.config['floor_value']}\n".encode())
                     time.sleep(0.1)
                     ser.write(f"SET_THR:{state.config['envelope_card_threshold']}\n".encode())

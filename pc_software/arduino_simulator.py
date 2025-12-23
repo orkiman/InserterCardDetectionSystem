@@ -156,6 +156,18 @@ class ArduinoSimulator:
 
             self.port = serial.Serial(port_name, 115200, timeout=0.1)
             self.port_name = port_name
+
+            # Flush buffers and discard any pending data
+            self.port.reset_input_buffer()
+            self.port.reset_output_buffer()
+
+            # Read and discard any stale data
+            discard_until = time.time() + 0.2
+            while time.time() < discard_until:
+                if self.port.in_waiting:
+                    self.port.read(self.port.in_waiting)
+                time.sleep(0.01)
+
             status_callback(f"Connected to {port_name}")
             self.send_message("MSG:System Booted")
 
