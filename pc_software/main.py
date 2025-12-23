@@ -15,7 +15,8 @@ DEFAULT_CONFIG = {
     "baud_rate": 115200,
     "floor_value": 100,  # ADC value for floor (50-500)
     "factor": 0.01,  # Manual conversion factor
-    "envelope_card_threshold": 150  # ADC threshold below which envelope is empty
+    "envelope_card_threshold": 150,  # ADC threshold below which envelope is empty
+    "reverse_sensor": False  # Reverse sensor reading (1023 - ADC)
 }
 
 class AppState:
@@ -83,8 +84,8 @@ class AppState:
             pass
 
     def get_mm(self, raw_adc):
-        # Check if sensor is out of range
-        if raw_adc < self.config["floor_value"] - 50 or raw_adc > self.config["floor_value"] + 450:
+        # Check if sensor is out of range (50-1000 absolute range)
+        if raw_adc < 50 or raw_adc > 1000:
             self.floor_error = True
             return 0.0
         else:
@@ -125,7 +126,12 @@ def serial_handler(page: ft.Page):
                     if line.startswith("D:"):
                         parts = line.split(":")[1].split(",")
                         if len(parts) >= 3:
-                            state.raw_val = int(parts[0])
+                            raw_adc = int(parts[0])
+                            # Apply reverse sensor if enabled
+                            if state.config.get("reverse_sensor", False):
+                                state.raw_val = 1023 - raw_adc
+                            else:
+                                state.raw_val = raw_adc
                             state.mm_val = state.get_mm(state.raw_val)
                             state.envelope_active = (parts[1] == "1")
                             state.stop_active = (parts[2] == "1")
@@ -250,7 +256,7 @@ def main(page: ft.Page):
 
     # New simplified configuration fields
     txt_floor = ft.TextField(
-        label="Floor Value (ADC: 50-500)",
+        label="Floor Value (ADC)",
         value=str(state.config["floor_value"]),
         width=200,
         helper_text="ADC value when nothing is on sensor"
@@ -267,24 +273,22 @@ def main(page: ft.Page):
         width=200,
         helper_text="Below this = empty envelope (error)"
     )
+    chk_reverse = ft.Checkbox(
+        label="Reverse Sensor Installation (1023 - ADC)",
+        value=state.config.get("reverse_sensor", False)
+    )
     lbl_config_status = ft.Text("", color=ft.Colors.GREEN)
 
     def save_settings(e):
         try:
             floor_val = int(txt_floor.value)
-            # Validate floor range
-            if floor_val < 50 or floor_val > 500:
-                lbl_config_status.value = "ERROR: Floor must be between 50-500"
-                lbl_config_status.color = ft.Colors.RED
-                lbl_config_status.update()
-                return
-
             factor_val = float(txt_factor.value)
             threshold_val = int(txt_threshold.value)
 
             state.config["floor_value"] = floor_val
             state.config["factor"] = factor_val
             state.config["envelope_card_threshold"] = threshold_val
+            state.config["reverse_sensor"] = chk_reverse.value
             state.save_config()
 
             # Send to Arduino
@@ -379,7 +383,7 @@ def main(page: ft.Page):
         ft.Text("Sensor Configuration", size=20, weight=ft.FontWeight.BOLD),
         ft.Container(height=10),
         txt_floor,
-        ft.Text("Set the ADC value when sensor reads the base/floor (nothing on it). Valid range: 50-500",
+        ft.Text("Set the ADC value when sensor reads the base/floor (nothing on it)",
                 size=12, color=ft.Colors.GREY_500),
         ft.Container(height=15),
         txt_factor,
@@ -388,6 +392,10 @@ def main(page: ft.Page):
         ft.Container(height=15),
         txt_threshold,
         ft.Text("Maximum ADC value for empty envelope detection (triggers error if below)",
+                size=12, color=ft.Colors.GREY_500),
+        ft.Container(height=15),
+        chk_reverse,
+        ft.Text("Enable if sensor is installed upside-down (inverts ADC reading)",
                 size=12, color=ft.Colors.GREY_500),
         ft.Container(height=20),
         ft.ElevatedButton("Save & Apply Configuration", on_click=save_settings, bgcolor=ft.Colors.BLUE),

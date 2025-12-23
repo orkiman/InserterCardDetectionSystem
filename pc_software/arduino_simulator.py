@@ -66,17 +66,14 @@ class ArduinoSimulator:
 
         if cmd.startswith("SET_FLOOR:"):
             val = int(cmd.split(":")[1])
-            if 50 <= val <= 500:
+            if 0 <= val <= 1023:
                 self.cfg_floor_value = val
                 self.send_message(f"MSG:Floor Value Set to {val}")
-            else:
-                self.send_message("ERR:Floor must be 50-500")
 
     def simulate_logic(self):
         """Simulate Arduino state machine logic"""
-        # Check sensor range (only trigger once)
-        if self.manual_adc < (self.cfg_floor_value - 50) or \
-           self.manual_adc > (self.cfg_floor_value + 450):
+        # Check sensor range (50-1000 absolute range, only trigger once)
+        if self.manual_adc < 50 or self.manual_adc > 1000:
             if not self.machine_stop_active:
                 self.machine_stop_active = True
                 self.send_message("LOG:ERR:SENSOR_OUT_OF_RANGE")

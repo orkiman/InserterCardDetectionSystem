@@ -10,7 +10,6 @@ void processCommand(String cmd);
 const int PIN_SENSOR      = A0;  // Analog Height Sensor
 const int PIN_ENVELOPE    = 2;   // Digital Input: Envelope Present Signal
 const int PIN_STOP_OUT    = 8;   // Digital Output: Machine Stop Trigger
-const int PIN_READY_OUT   = 9;   // Digital Output: System Heartbeat/Ready LED
 
 // --- CONFIGURATION CONSTANTS (DEFAULTS) ---
 // These can be updated via Serial commands
@@ -54,13 +53,11 @@ void setup() {
 
   // 2. Configure Pins
   pinMode(PIN_ENVELOPE, INPUT_PULLUP); // Assume Active LOW (Ground = Envelope Present)
-  
+
   pinMode(PIN_STOP_OUT, OUTPUT);
-  pinMode(PIN_READY_OUT, OUTPUT);
-  
+
   // Initial Output States
   digitalWrite(PIN_STOP_OUT, LOW);  // Low = Run, High = Stop (Assumed logic)
-  digitalWrite(PIN_READY_OUT, HIGH); // HIGH = System Ready (Fully ON)
 
   // 3. Init State
   lastPingReceived = millis();
@@ -92,8 +89,8 @@ void loop() {
     }
   }
 
-  // B. Sensor Range Check (50-500 valid range around floor)
-  if (sensorValue < (CFG_FLOOR_VALUE - 50) || sensorValue > (CFG_FLOOR_VALUE + 450)) {
+  // B. Sensor Range Check (50-1000 absolute valid range)
+  if (sensorValue < 50 || sensorValue > 1000) {
     if (!machineStopActive) {
       triggerStop("ERR:SENSOR_OUT_OF_RANGE");
     }
@@ -196,17 +193,15 @@ void triggerStop(String reason) {
   machineStopActive = true;
   currentState = STATE_FAULT;
   digitalWrite(PIN_STOP_OUT, HIGH); // Activate Stop Relay
-  digitalWrite(PIN_READY_OUT, LOW); // Turn OFF Ready LED
-  Serial.print("LOG:"); Serial.println(reason);
+  Serial.println(reason);  // Send the error (already has ERR: prefix)
 }
 
 void resetSystem() {
   machineStopActive = false;
   currentState = STATE_IDLE;
   digitalWrite(PIN_STOP_OUT, LOW); // Release Stop Relay
-  digitalWrite(PIN_READY_OUT, HIGH); // Turn ON Ready LED
   // Reset filter to avoid instant re-trigger
-  filteredValue = analogRead(PIN_SENSOR); 
+  filteredValue = analogRead(PIN_SENSOR);
   Serial.println("MSG:System Resumed");
 }
 
@@ -240,12 +235,10 @@ void processCommand(String cmd) {
   // Configuration: Set Floor Value (e.g., "SET_FLOOR:100")
   if (cmd.startsWith("SET_FLOOR:")) {
     int val = cmd.substring(10).toInt();
-    if (val >= 50 && val <= 500) {
+    if (val >= 0 && val <= 1023) {
       CFG_FLOOR_VALUE = val;
       Serial.print("MSG:Floor Value Set to ");
       Serial.println(CFG_FLOOR_VALUE);
-    } else {
-      Serial.println("ERR:Floor must be 50-500");
     }
   }
 }
