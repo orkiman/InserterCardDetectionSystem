@@ -1,7 +1,7 @@
 {
-    "serial_port": "COM4",
+    "serial_port": "COM5",
     "baud_rate": 115200,
-    "floor_value": 570,
+    "floor_value": 80,
     "factor": 0.01,
     "envelope_card_threshold": 700,
     "reverse_sensor": false
