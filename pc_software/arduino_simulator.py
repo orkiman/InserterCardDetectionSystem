@@ -191,8 +191,8 @@ class ArduinoSimulator:
 def main(page: ft.Page):
     page.title = "Arduino Card Detector Simulator"
     page.theme_mode = ft.ThemeMode.DARK
-    page.window.width = 500
-    page.window.height = 700
+    page.window_width = 500
+    page.window_height = 700
 
     sim = ArduinoSimulator()
 
@@ -216,21 +216,21 @@ def main(page: ft.Page):
         status_text.update()
 
     def connect_clicked(e):
-        if btn_connect.text == "Connect":
+        if btn_connect.content.value == "Connect":
             if sim.connect(port_input.value, update_status):
-                btn_connect.text = "Disconnect"
+                btn_connect.content.value = "Disconnect"
                 btn_connect.bgcolor = ft.Colors.RED
                 # Start serial thread
                 threading.Thread(target=sim.serial_thread, args=(update_status,), daemon=True).start()
         else:
             sim.disconnect()
-            btn_connect.text = "Connect"
+            btn_connect.content.value = "Connect"
             btn_connect.bgcolor = ft.Colors.GREEN
             update_status("Disconnected")
         btn_connect.update()
 
-    btn_connect = ft.ElevatedButton(
-        "Connect",
+    btn_connect = ft.Button(
+        content=ft.Text("Connect"),
         on_click=connect_clicked,
         bgcolor=ft.Colors.GREEN
     )
@@ -285,7 +285,7 @@ def main(page: ft.Page):
         padding=10,
         border_radius=5,
         width=150,
-        alignment=ft.alignment.center
+        alignment=ft.Alignment(0, 0)
     )
 
     # Update indicators thread
@@ -363,9 +363,9 @@ def main(page: ft.Page):
                 lbl_adc_value,
                 slider_adc,
                 ft.Row([
-                    ft.ElevatedButton("Set to Floor", on_click=set_floor, bgcolor=ft.Colors.BLUE_700),
-                    ft.ElevatedButton("With Card", on_click=set_with_card, bgcolor=ft.Colors.GREEN_700),
-                    ft.ElevatedButton("Empty", on_click=set_empty, bgcolor=ft.Colors.ORANGE_700),
+                    ft.Button("Set to Floor", on_click=set_floor, bgcolor=ft.Colors.BLUE_700),
+                    ft.Button("With Card", on_click=set_with_card, bgcolor=ft.Colors.GREEN_700),
+                    ft.Button("Empty", on_click=set_empty, bgcolor=ft.Colors.ORANGE_700),
                 ]),
                 ft.Container(height=10),
                 chk_envelope,
@@ -389,4 +389,4 @@ def main(page: ft.Page):
         )
     )
 
-ft.app(target=main)
+ft.run(main)
