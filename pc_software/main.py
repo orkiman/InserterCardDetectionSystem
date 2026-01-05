@@ -17,7 +17,8 @@ DEFAULT_CONFIG = {
     "floor_value": 100,
     "factor": 0.01,
     "envelope_card_threshold": 150,
-    "reverse_sensor": False
+    "reverse_sensor": False,
+    "system_override": False
 }
 
 # PubSub Topics
@@ -105,8 +106,14 @@ def serial_handler(page: ft.Page):
                     time.sleep(0.1)
                     ser.dtr = True
                     time.sleep(2.0)
+                    # Aggressive buffer clearing - read and discard all pending data
                     ser.reset_input_buffer()
                     ser.reset_output_buffer()
+                    time.sleep(0.1)
+                    while ser.in_waiting:
+                        ser.read(ser.in_waiting)
+                        time.sleep(0.05)
+                    ser.reset_input_buffer()
                     state.graph_points.clear()
                     state.graph_min = 0
                     state.graph_max = 1023
@@ -118,6 +125,9 @@ def serial_handler(page: ft.Page):
                     time.sleep(0.1)
                     reverse_val = 1 if state.config.get('reverse_sensor', False) else 0
                     ser.write(f"SET_REVERSE:{reverse_val}\n".encode())
+                    time.sleep(0.1)
+                    override_val = 1 if state.config.get('system_override', False) else 0
+                    ser.write(f"SET_OVERRIDE:{override_val}\n".encode())
                 except Exception:
                     time.sleep(2)
 
@@ -142,13 +152,17 @@ def serial_handler(page: ft.Page):
                                 for i, p in enumerate(state.graph_points):
                                     p.x = i
                             page.pubsub.send_all_on_topic(TOPIC_DATA, None)
-                    elif line.startswith("EVT:PASS"):
+                    elif line == "EVT:PASS":
                         state.last_event = "PASS OK"
+                        page.pubsub.send_all_on_topic(TOPIC_EVENT, None)
+                    elif line == "EVT:PASS_OVERRIDE":
+                        state.last_event = "PASS (OVERRIDE)"
                         page.pubsub.send_all_on_topic(TOPIC_EVENT, None)
                     elif line.startswith("ERR:"):
                         error_msg = line.split(':', 1)[1] if ':' in line else line
                         state.last_error = f"STOP: {error_msg}"
                         state.last_event = state.last_error
+                        state.stop_active = True  # Set stop active immediately on error
                         state.log_error(error_msg)
                         page.pubsub.send_all_on_topic(TOPIC_EVENT, None)
                         page.pubsub.send_all_on_topic(TOPIC_ERROR_HISTORY, None)
@@ -248,16 +262,34 @@ def main(page: ft.Page):
     )
 
     # Resume button
+    btn_resume_text = ft.Text("RESUME MACHINE", color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD)
+
     def on_resume_clicked(_):
         send_command("RESUME")
         state.last_error = ""
+        state.stop_active = False
         state.last_event = "System Ready"
         page.pubsub.send_all_on_topic(TOPIC_EVENT, None)
 
-    btn_resume = ft.Button(
-        content=ft.Text("RESUME MACHINE", color=ft.Colors.WHITE),
+    btn_resume = ft.Container(
+        content=btn_resume_text,
         bgcolor=ft.Colors.GREEN,
-        on_click=on_resume_clicked
+        padding=ft.padding.symmetric(horizontal=20, vertical=10),
+        border_radius=5,
+        on_click=on_resume_clicked,
+        ink=True,
+    )
+
+    # Override warning label (shown on main screen when override active)
+    lbl_override_warning = ft.Container(
+        content=ft.Row([
+            ft.Icon(ft.Icons.WARNING, color=ft.Colors.WHITE, size=20),
+            ft.Text("SYSTEM OVERRIDE ACTIVE", color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD, size=14),
+        ], alignment=ft.MainAxisAlignment.CENTER),
+        bgcolor=ft.Colors.ORANGE,
+        padding=10,
+        border_radius=5,
+        visible=state.config.get("system_override", False),
     )
 
     # Configuration fields
@@ -268,9 +300,32 @@ def main(page: ft.Page):
         helper="Below this = empty envelope (error)"
     )
 
+    def on_reverse_change(e):
+        state.config["reverse_sensor"] = e.control.value
+        state.save_config()
+        send_command(f"SET_REVERSE:{1 if e.control.value else 0}")
+
     chk_reverse = ft.Checkbox(
         label="Reverse Sensor Signal (1023 - ADC)",
-        value=state.config.get("reverse_sensor", False)
+        value=state.config.get("reverse_sensor", False),
+        on_change=on_reverse_change
+    )
+
+    def on_override_change(e):
+        state.config["system_override"] = e.control.value
+        state.save_config()
+        send_command(f"SET_OVERRIDE:{1 if e.control.value else 0}")
+        # Update override warning visibility
+        lbl_override_warning.visible = e.control.value
+        lbl_override_warning.update()
+        # If enabling override, clear error and resume
+        if e.control.value:
+            on_resume_clicked(None)
+
+    chk_system_override = ft.Checkbox(
+        label="System Override (bypass error detection)",
+        value=state.config.get("system_override", False),
+        on_change=on_override_change
     )
 
     txt_floor = ft.TextField(
@@ -299,11 +354,13 @@ def main(page: ft.Page):
             state.config["factor"] = factor_val
             state.config["envelope_card_threshold"] = threshold_val
             state.config["reverse_sensor"] = chk_reverse.value
+            state.config["system_override"] = chk_system_override.value
             state.save_config()
 
             send_command(f"SET_FLOOR:{floor_val}")
             send_command(f"SET_THR:{threshold_val}")
             send_command(f"SET_REVERSE:{1 if chk_reverse.value else 0}")
+            send_command(f"SET_OVERRIDE:{1 if chk_system_override.value else 0}")
 
             lbl_config_status.value = "Settings Saved & Uploaded"
             lbl_config_status.color = ft.Colors.GREEN
@@ -348,6 +405,7 @@ def main(page: ft.Page):
     # Dashboard tab
     tab_dashboard = ft.Container(
         content=ft.Column([
+            lbl_override_warning,
             ft.Row([
                 ft.Container(
                     content=ft.Column([
@@ -405,6 +463,15 @@ def main(page: ft.Page):
         ft.Container(height=20),
         ft.Divider(),
 
+        ft.Text("System Override", size=20, weight=ft.FontWeight.BOLD),
+        ft.Container(height=10),
+        chk_system_override,
+        ft.Text("WARNING: Bypasses all error detection - use with caution!",
+                size=12, color=ft.Colors.ORANGE_300),
+
+        ft.Container(height=20),
+        ft.Divider(),
+
         ft.Text("Display Parameters", size=20, weight=ft.FontWeight.BOLD),
         ft.Text("(For visualization only - do not affect validation)",
                 size=11, color=ft.Colors.GREY_600, italic=True),
@@ -456,6 +523,13 @@ def main(page: ft.Page):
         ),
     )
 
+    # Keyboard shortcut: Space bar to resume
+    def on_keyboard(e: ft.KeyboardEvent):
+        if e.key == " ":
+            on_resume_clicked(None)
+
+    page.on_keyboard_event = on_keyboard
+
     page.add(
         ft.Row([status_icon, status_text], alignment=ft.MainAxisAlignment.END),
         tabs,
@@ -493,16 +567,15 @@ def main(page: ft.Page):
         chart.update()
 
     def on_event_update(topic, message):
-        if state.last_error and state.stop_active:
+        if state.last_error:
             lbl_event.value = state.last_error
             lbl_event.color = ft.Colors.RED
             btn_resume.bgcolor = ft.Colors.RED
         else:
             lbl_event.value = state.last_event
-            lbl_event.color = ft.Colors.RED if "STOP" in state.last_event else ft.Colors.GREEN
+            lbl_event.color = ft.Colors.GREEN
             btn_resume.bgcolor = ft.Colors.GREEN
-        lbl_event.update()
-        btn_resume.update()
+        page.update()
 
     def on_error_history_update(topic, message):
         update_error_list()

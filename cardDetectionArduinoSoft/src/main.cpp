@@ -9,13 +9,14 @@ void processCommand(String cmd);
 // --- HARDWARE PIN DEFINITIONS ---
 const int PIN_SENSOR      = A0;  // Analog Height Sensor
 const int PIN_ENVELOPE    = 2;   // Digital Input: Envelope Present Signal
-const int PIN_STOP_OUT    = 8;   // Digital Output: Machine Stop Trigger
+const int PIN_ENABLE_OUT  = 8;   // Digital Output: Machine Enable Signal
 
 // --- CONFIGURATION CONSTANTS (DEFAULTS) ---
 // These can be updated via Serial commands
 int CFG_FLOOR_VALUE       = 100; // Floor ADC value (50-500 valid range)
 int CFG_CARD_THRESHOLD    = 150; // Below this = empty envelope (error)
 bool CFG_REVERSE_SENSOR   = false; // Reverse sensor signal (1023 - ADC)
+bool CFG_SYSTEM_OVERRIDE  = false; // Bypass all error detection
 const long WATCHDOG_TIMEOUT = 2000; // Time in ms before stopping if no PC Ping
 
 // --- SIGNAL FILTERING ---
@@ -55,10 +56,10 @@ void setup() {
   // 2. Configure Pins
   pinMode(PIN_ENVELOPE, INPUT_PULLUP); // Assume Active LOW (Ground = Envelope Present)
 
-  pinMode(PIN_STOP_OUT, OUTPUT);
+  pinMode(PIN_ENABLE_OUT, OUTPUT);
 
   // Initial Output States
-  digitalWrite(PIN_STOP_OUT, LOW);  // Low = Run, High = Stop (Assumed logic)
+  digitalWrite(PIN_ENABLE_OUT, HIGH);  // High = Enabled, Low = Disabled
 
   // 3. Init State
   lastPingReceived = millis();
@@ -85,19 +86,21 @@ void loop() {
   int sensorValue = (int)filteredValue;
 
   // ============================================================
-  // 2. WATCHDOG & SAFETY CHECK
+  // 2. WATCHDOG & SAFETY CHECK (skipped if system override enabled)
   // ============================================================
-  // A. PC Connection Watchdog
-  if (currentMillis - lastPingReceived > WATCHDOG_TIMEOUT) {
-    if (!machineStopActive) {
-      triggerStop("ERR:WATCHDOG_TIMEOUT");
+  if (!CFG_SYSTEM_OVERRIDE) {
+    // A. PC Connection Watchdog
+    if (currentMillis - lastPingReceived > WATCHDOG_TIMEOUT) {
+      if (!machineStopActive) {
+        triggerStop("ERR:WATCHDOG_TIMEOUT");
+      }
     }
-  }
 
-  // B. Sensor Range Check (50-1000 absolute valid range)
-  if (sensorValue < 50 || sensorValue > 1000) {
-    if (!machineStopActive) {
-      triggerStop("ERR:SENSOR_OUT_OF_RANGE");
+    // B. Sensor Range Check (50-1000 absolute valid range)
+    if (sensorValue < 50 || sensorValue > 1000) {
+      if (!machineStopActive) {
+        triggerStop("ERR:SENSOR_OUT_OF_RANGE");
+      }
     }
   }
 
@@ -190,21 +193,26 @@ void validateResult() {
     Serial.println("EVT:PASS");
   } else {
     // FAIL: Peak was below threshold (Empty Envelope)
-    triggerStop("ERR:EMPTY_ENVELOPE");
+    if (CFG_SYSTEM_OVERRIDE) {
+      // Override enabled - report as pass anyway
+      Serial.println("EVT:PASS_OVERRIDE");
+    } else {
+      triggerStop("ERR:EMPTY_ENVELOPE");
+    }
   }
 }
 
 void triggerStop(String reason) {
   machineStopActive = true;
   currentState = STATE_FAULT;
-  digitalWrite(PIN_STOP_OUT, HIGH); // Activate Stop Relay
+  digitalWrite(PIN_ENABLE_OUT, LOW); // Disable machine
   Serial.println(reason);  // Send the error (already has ERR: prefix)
 }
 
 void resetSystem() {
   machineStopActive = false;
   currentState = STATE_IDLE;
-  digitalWrite(PIN_STOP_OUT, LOW); // Release Stop Relay
+  digitalWrite(PIN_ENABLE_OUT, HIGH); // Enable machine
   // Reset filter to avoid instant re-trigger
   filteredValue = analogRead(PIN_SENSOR);
   Serial.println("MSG:System Resumed");
@@ -253,5 +261,13 @@ void processCommand(String cmd) {
     CFG_REVERSE_SENSOR = (val == 1);
     Serial.print("MSG:Reverse Sensor ");
     Serial.println(CFG_REVERSE_SENSOR ? "Enabled" : "Disabled");
+  }
+
+  // Configuration: Set System Override (e.g., "SET_OVERRIDE:1")
+  if (cmd.startsWith("SET_OVERRIDE:")) {
+    int val = cmd.substring(13).toInt();
+    CFG_SYSTEM_OVERRIDE = (val == 1);
+    Serial.print("MSG:System Override ");
+    Serial.println(CFG_SYSTEM_OVERRIDE ? "ENABLED - Safety bypassed!" : "Disabled");
   }
 }

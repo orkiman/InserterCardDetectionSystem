@@ -1,8 +1,9 @@
 {
-    "serial_port": "COM4",
+    "serial_port": "COM6",
     "baud_rate": 115200,
     "floor_value": 104,
     "factor": 0.01,
     "envelope_card_threshold": 200,
-    "reverse_sensor": false
+    "reverse_sensor": false,
+    "system_override": false
 }

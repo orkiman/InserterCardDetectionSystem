@@ -3,6 +3,9 @@
 		{
 			"path": ".",
 			"name": "InserterCardDetectionSystem"
+		},
+		{
+			"path": "cardDetectionArduinoSoft"
 		}
 	],
 	"settings": {}
