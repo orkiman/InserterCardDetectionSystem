@@ -64,6 +64,9 @@ void setup() {
   // 3. Init State
   lastPingReceived = millis();
   filteredValue = analogRead(PIN_SENSOR); // Seed filter
+  if (CFG_REVERSE_SENSOR) {
+    filteredValue = 1023 - filteredValue;
+  }
   envelopeState = digitalRead(PIN_ENVELOPE); // Seed debounce
   lastFlickerableState = envelopeState;
 
@@ -215,6 +218,9 @@ void resetSystem() {
   digitalWrite(PIN_ENABLE_OUT, HIGH); // Enable machine
   // Reset filter to avoid instant re-trigger
   filteredValue = analogRead(PIN_SENSOR);
+  if (CFG_REVERSE_SENSOR) {
+    filteredValue = 1023 - filteredValue;
+  }
   Serial.println("MSG:System Resumed");
 }
 
