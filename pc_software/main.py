@@ -18,7 +18,9 @@ DEFAULT_CONFIG = {
     "factor": 0.01,
     "envelope_card_threshold": 150,
     "reverse_sensor": False,
-    "system_override": False
+    "system_override": False,
+    "log_level": "warn",  # "info" = log all, "warn" = log errors only
+    "total_count": 0  # Persistent total envelope count
 }
 
 # PubSub Topics
@@ -26,6 +28,7 @@ TOPIC_STATUS = "status"
 TOPIC_DATA = "data"
 TOPIC_EVENT = "event"
 TOPIC_ERROR_HISTORY = "error_history"
+TOPIC_COUNTERS = "counters"
 
 
 class AppState:
@@ -45,6 +48,9 @@ class AppState:
         self.floor_error = False
         self.graph_min = 0
         self.graph_max = 1023
+        # Counters
+        self.session_count = 0
+        self.last_max_value = 0
 
     def load_config(self):
         if os.path.exists(CONFIG_FILE):
@@ -69,16 +75,40 @@ class AppState:
         with open(CONFIG_FILE, 'w') as f:
             json.dump(self.config, f, indent=4)
 
-    def log_error(self, error_msg):
+    def log_error(self, error_msg, max_val=0):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self.error_history.insert(0, (timestamp, error_msg))
+        total = self.config.get("total_count", 0)
+        log_msg = f"#{total} {error_msg} (max={max_val})" if max_val else f"#{total} {error_msg}"
+        self.error_history.insert(0, (timestamp, log_msg, "error"))
         if len(self.error_history) > self.max_error_history:
             self.error_history.pop()
         try:
             with open(ERROR_LOG_FILE, 'a') as f:
-                f.write(f"[{timestamp}] {error_msg}\n")
+                f.write(f"[{timestamp}] #{total} ERROR: {error_msg} (max={max_val})\n")
         except:
             pass
+
+    def log_pass(self, max_val, override=False):
+        # Only log if log_level is "info"
+        if self.config.get("log_level", "warn") != "info":
+            return
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        total = self.config.get("total_count", 0)
+        status = "PASS_OVERRIDE" if override else "PASS"
+        log_msg = f"#{total} {status} (max={max_val})"
+        self.error_history.insert(0, (timestamp, log_msg, "info"))
+        if len(self.error_history) > self.max_error_history:
+            self.error_history.pop()
+        try:
+            with open(ERROR_LOG_FILE, 'a') as f:
+                f.write(f"[{timestamp}] #{total} INFO: {status} (max={max_val})\n")
+        except:
+            pass
+
+    def increment_counters(self):
+        self.session_count += 1
+        self.config["total_count"] = self.config.get("total_count", 0) + 1
+        self.save_config()
 
     def get_mm(self, raw_adc):
         if raw_adc < 50 or raw_adc > 1000:
@@ -152,18 +182,38 @@ def serial_handler(page: ft.Page):
                                 for i, p in enumerate(state.graph_points):
                                     p.x = i
                             page.pubsub.send_all_on_topic(TOPIC_DATA, None)
-                    elif line == "EVT:PASS":
-                        state.last_event = "PASS OK"
+                    elif line.startswith("EVT:PASS:"):
+                        # Format: EVT:PASS:maxValue
+                        parts = line.split(":")
+                        max_val = int(parts[2]) if len(parts) > 2 else 0
+                        state.last_max_value = max_val
+                        state.last_event = f"PASS OK (max={max_val})"
+                        state.increment_counters()
+                        state.log_pass(max_val, override=False)
                         page.pubsub.send_all_on_topic(TOPIC_EVENT, None)
-                    elif line == "EVT:PASS_OVERRIDE":
-                        state.last_event = "PASS (OVERRIDE)"
+                        page.pubsub.send_all_on_topic(TOPIC_COUNTERS, None)
+                        page.pubsub.send_all_on_topic(TOPIC_ERROR_HISTORY, None)
+                    elif line.startswith("EVT:PASS_OVERRIDE:"):
+                        # Format: EVT:PASS_OVERRIDE:maxValue
+                        parts = line.split(":")
+                        max_val = int(parts[2]) if len(parts) > 2 else 0
+                        state.last_max_value = max_val
+                        state.last_event = f"PASS OVERRIDE (max={max_val})"
+                        state.increment_counters()
+                        state.log_pass(max_val, override=True)
                         page.pubsub.send_all_on_topic(TOPIC_EVENT, None)
+                        page.pubsub.send_all_on_topic(TOPIC_COUNTERS, None)
+                        page.pubsub.send_all_on_topic(TOPIC_ERROR_HISTORY, None)
                     elif line.startswith("ERR:"):
-                        error_msg = line.split(':', 1)[1] if ':' in line else line
-                        state.last_error = f"STOP: {error_msg}"
+                        # Format: ERR:ERROR_TYPE:maxValue or ERR:ERROR_TYPE
+                        parts = line.split(":")
+                        error_type = parts[1] if len(parts) > 1 else "UNKNOWN"
+                        max_val = int(parts[2]) if len(parts) > 2 else 0
+                        state.last_max_value = max_val
+                        state.last_error = f"STOP: {error_type} (max={max_val})"
                         state.last_event = state.last_error
-                        state.stop_active = True  # Set stop active immediately on error
-                        state.log_error(error_msg)
+                        state.stop_active = True
+                        state.log_error(error_type, max_val)
                         page.pubsub.send_all_on_topic(TOPIC_EVENT, None)
                         page.pubsub.send_all_on_topic(TOPIC_ERROR_HISTORY, None)
 
@@ -193,6 +243,7 @@ def main(page: ft.Page):
     page.title = "Card Detector HMI"
     page.theme_mode = ft.ThemeMode.DARK
     page.padding = 20
+    page.window.maximized = True
 
     # SnackBar for notifications
     snack_bar = ft.SnackBar(content=ft.Text(""))
@@ -292,6 +343,21 @@ def main(page: ft.Page):
         visible=state.config.get("system_override", False),
     )
 
+    # Counter labels
+    lbl_session_count = ft.Text(f"Session: {state.session_count}", size=14, weight=ft.FontWeight.BOLD)
+    lbl_total_count = ft.Text(f"Total: {state.config.get('total_count', 0)}", size=14, weight=ft.FontWeight.BOLD)
+
+    def reset_session_count(_):
+        state.session_count = 0
+        lbl_session_count.value = f"Session: {state.session_count}"
+        lbl_session_count.update()
+
+    def reset_total_count(_):
+        state.config["total_count"] = 0
+        state.save_config()
+        lbl_total_count.value = f"Total: {state.config.get('total_count', 0)}"
+        lbl_total_count.update()
+
     # Configuration fields
     txt_threshold = ft.TextField(
         label="Envelope + Card Threshold (ADC)",
@@ -326,6 +392,22 @@ def main(page: ft.Page):
         label="System Override (bypass error detection)",
         value=state.config.get("system_override", False),
         on_change=on_override_change
+    )
+
+    # Log level dropdown
+    def on_log_level_change(e):
+        state.config["log_level"] = e.control.value
+        state.save_config()
+
+    drp_log_level = ft.Dropdown(
+        label="Log Level",
+        width=200,
+        value=state.config.get("log_level", "warn"),
+        options=[
+            ft.DropdownOption(key="warn", text="Errors Only"),
+            ft.DropdownOption(key="info", text="All Events"),
+        ],
+        on_change=on_log_level_change
     )
 
     txt_floor = ft.TextField(
@@ -380,18 +462,29 @@ def main(page: ft.Page):
         error_list.controls.clear()
         if not state.error_history:
             error_list.controls.append(
-                ft.Text("No errors logged", size=12, color=ft.Colors.GREY_600, italic=True)
+                ft.Text("No events logged", size=12, color=ft.Colors.GREY_600, italic=True)
             )
         else:
-            for timestamp, error_msg in state.error_history:
+            for entry in state.error_history:
+                # Handle both old format (timestamp, msg) and new format (timestamp, msg, type)
+                if len(entry) == 3:
+                    timestamp, log_msg, log_type = entry
+                else:
+                    timestamp, log_msg = entry
+                    log_type = "error"
+
+                is_error = log_type == "error"
+                color = ft.Colors.RED_300 if is_error else ft.Colors.GREEN_300
+                bg_color = ft.Colors.RED if is_error else ft.Colors.GREEN
+
                 error_list.controls.append(
                     ft.Container(
                         content=ft.Row([
                             ft.Text(timestamp, size=10, color=ft.Colors.GREY_500, width=140),
-                            ft.Text(error_msg, size=11, color=ft.Colors.RED_300),
+                            ft.Text(log_msg, size=11, color=color),
                         ]),
                         padding=5,
-                        bgcolor=ft.Colors.with_opacity(0.05, ft.Colors.RED),
+                        bgcolor=ft.Colors.with_opacity(0.05, bg_color),
                         border_radius=5,
                     )
                 )
@@ -424,7 +517,33 @@ def main(page: ft.Page):
                     ], horizontal_alignment=ft.CrossAxisAlignment.END),
                 )
             ]),
-            ft.Container(height=20),
+            ft.Container(height=10),
+            # Counters row
+            ft.Container(
+                content=ft.Row([
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Icon(ft.Icons.NUMBERS, size=16, color=ft.Colors.BLUE_300),
+                            lbl_session_count,
+                            ft.IconButton(ft.Icons.REFRESH, icon_size=14, on_click=reset_session_count, tooltip="Reset session"),
+                        ]),
+                        bgcolor=ft.Colors.with_opacity(0.1, ft.Colors.BLUE),
+                        padding=ft.padding.symmetric(horizontal=10, vertical=5),
+                        border_radius=5,
+                    ),
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Icon(ft.Icons.INVENTORY, size=16, color=ft.Colors.PURPLE_300),
+                            lbl_total_count,
+                            ft.IconButton(ft.Icons.REFRESH, icon_size=14, on_click=reset_total_count, tooltip="Reset total"),
+                        ]),
+                        bgcolor=ft.Colors.with_opacity(0.1, ft.Colors.PURPLE),
+                        padding=ft.padding.symmetric(horizontal=10, vertical=5),
+                        border_radius=5,
+                    ),
+                ], spacing=20),
+            ),
+            ft.Container(height=10),
             ft.Text("LIVE SENSOR DATA", size=12, weight=ft.FontWeight.BOLD),
             ft.Container(
                 content=chart,
@@ -434,7 +553,7 @@ def main(page: ft.Page):
                 padding=10
             ),
             ft.Container(height=10),
-            ft.Text("ERROR HISTORY (Last 10)", size=12, weight=ft.FontWeight.BOLD),
+            ft.Text("EVENT LOG (Last 10)", size=12, weight=ft.FontWeight.BOLD),
             ft.Container(
                 content=error_list,
                 bgcolor=ft.Colors.with_opacity(0.02, ft.Colors.WHITE),
@@ -468,6 +587,15 @@ def main(page: ft.Page):
         chk_system_override,
         ft.Text("WARNING: Bypasses all error detection - use with caution!",
                 size=12, color=ft.Colors.ORANGE_300),
+
+        ft.Container(height=20),
+        ft.Divider(),
+
+        ft.Text("Logging", size=20, weight=ft.FontWeight.BOLD),
+        ft.Container(height=10),
+        drp_log_level,
+        ft.Text("'Errors Only' logs only failures, 'All Events' also logs successful passes",
+                size=12, color=ft.Colors.GREY_500),
 
         ft.Container(height=20),
         ft.Divider(),
@@ -580,11 +708,18 @@ def main(page: ft.Page):
     def on_error_history_update(topic, message):
         update_error_list()
 
+    def on_counters_update(topic, message):
+        lbl_session_count.value = f"Session: {state.session_count}"
+        lbl_total_count.value = f"Total: {state.config.get('total_count', 0)}"
+        lbl_session_count.update()
+        lbl_total_count.update()
+
     # Subscribe to specific topics
     page.pubsub.subscribe_topic(TOPIC_STATUS, on_status_update)
     page.pubsub.subscribe_topic(TOPIC_DATA, on_data_update)
     page.pubsub.subscribe_topic(TOPIC_EVENT, on_event_update)
     page.pubsub.subscribe_topic(TOPIC_ERROR_HISTORY, on_error_history_update)
+    page.pubsub.subscribe_topic(TOPIC_COUNTERS, on_counters_update)
 
     refresh_ports()
     threading.Thread(target=serial_handler, args=(page,), daemon=True).start()

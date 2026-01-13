@@ -192,15 +192,22 @@ void validateResult() {
   // If below threshold = empty envelope (no card)
 
   if (maxPeakInWindow >= CFG_CARD_THRESHOLD) {
-    // PASS: Card detected
-    Serial.println("EVT:PASS");
+    // PASS: Card detected - include max value
+    Serial.print("EVT:PASS:");
+    Serial.println(maxPeakInWindow);
   } else {
     // FAIL: Peak was below threshold (Empty Envelope)
     if (CFG_SYSTEM_OVERRIDE) {
-      // Override enabled - report as pass anyway
-      Serial.println("EVT:PASS_OVERRIDE");
+      // Override enabled - report as pass anyway with max value
+      Serial.print("EVT:PASS_OVERRIDE:");
+      Serial.println(maxPeakInWindow);
     } else {
-      triggerStop("ERR:EMPTY_ENVELOPE");
+      // Include max value in error for debugging
+      Serial.print("ERR:EMPTY_ENVELOPE:");
+      Serial.println(maxPeakInWindow);
+      machineStopActive = true;
+      currentState = STATE_FAULT;
+      digitalWrite(PIN_ENABLE_OUT, LOW);
     }
   }
 }
