@@ -20,7 +20,8 @@ DEFAULT_CONFIG = {
     "reverse_sensor": False,
     "system_override": False,
     "log_level": "warn",  # "info" = log all, "warn" = log errors only
-    "total_count": 0  # Persistent total envelope count
+    "total_good_count": 0,  # Persistent good envelope count
+    "total_error_count": 0  # Persistent error envelope count
 }
 
 # PubSub Topics
@@ -49,7 +50,8 @@ class AppState:
         self.graph_min = 0
         self.graph_max = 1023
         # Counters
-        self.session_count = 0
+        self.session_good_count = 0
+        self.session_error_count = 0
         self.last_max_value = 0
 
     def load_config(self):
@@ -77,14 +79,14 @@ class AppState:
 
     def log_error(self, error_msg, max_val=0):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        total = self.config.get("total_count", 0)
-        log_msg = f"#{total} {error_msg} (max={max_val})" if max_val else f"#{total} {error_msg}"
+        total_err = self.config.get("total_error_count", 0)
+        log_msg = f"#E{total_err} {error_msg} (max={max_val})" if max_val else f"#E{total_err} {error_msg}"
         self.error_history.insert(0, (timestamp, log_msg, "error"))
         if len(self.error_history) > self.max_error_history:
             self.error_history.pop()
         try:
             with open(ERROR_LOG_FILE, 'a') as f:
-                f.write(f"[{timestamp}] #{total} ERROR: {error_msg} (max={max_val})\n")
+                f.write(f"[{timestamp}] #E{total_err} ERROR: {error_msg} (max={max_val})\n")
         except:
             pass
 
@@ -93,21 +95,26 @@ class AppState:
         if self.config.get("log_level", "warn") != "info":
             return
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        total = self.config.get("total_count", 0)
+        total_good = self.config.get("total_good_count", 0)
         status = "PASS_OVERRIDE" if override else "PASS"
-        log_msg = f"#{total} {status} (max={max_val})"
+        log_msg = f"#G{total_good} {status} (max={max_val})"
         self.error_history.insert(0, (timestamp, log_msg, "info"))
         if len(self.error_history) > self.max_error_history:
             self.error_history.pop()
         try:
             with open(ERROR_LOG_FILE, 'a') as f:
-                f.write(f"[{timestamp}] #{total} INFO: {status} (max={max_val})\n")
+                f.write(f"[{timestamp}] #G{total_good} INFO: {status} (max={max_val})\n")
         except:
             pass
 
-    def increment_counters(self):
-        self.session_count += 1
-        self.config["total_count"] = self.config.get("total_count", 0) + 1
+    def increment_good_counter(self):
+        self.session_good_count += 1
+        self.config["total_good_count"] = self.config.get("total_good_count", 0) + 1
+        self.save_config()
+
+    def increment_error_counter(self):
+        self.session_error_count += 1
+        self.config["total_error_count"] = self.config.get("total_error_count", 0) + 1
         self.save_config()
 
     def get_mm(self, raw_adc):
@@ -188,7 +195,7 @@ def serial_handler(page: ft.Page):
                         max_val = int(parts[2]) if len(parts) > 2 else 0
                         state.last_max_value = max_val
                         state.last_event = f"PASS OK (max={max_val})"
-                        state.increment_counters()
+                        state.increment_good_counter()
                         state.log_pass(max_val, override=False)
                         page.pubsub.send_all_on_topic(TOPIC_EVENT, None)
                         page.pubsub.send_all_on_topic(TOPIC_COUNTERS, None)
@@ -199,7 +206,7 @@ def serial_handler(page: ft.Page):
                         max_val = int(parts[2]) if len(parts) > 2 else 0
                         state.last_max_value = max_val
                         state.last_event = f"PASS OVERRIDE (max={max_val})"
-                        state.increment_counters()
+                        state.increment_good_counter()
                         state.log_pass(max_val, override=True)
                         page.pubsub.send_all_on_topic(TOPIC_EVENT, None)
                         page.pubsub.send_all_on_topic(TOPIC_COUNTERS, None)
@@ -213,7 +220,7 @@ def serial_handler(page: ft.Page):
                         state.last_error = f"STOP: {error_type} (max={max_val})"
                         state.last_event = state.last_error
                         state.stop_active = True
-                        state.increment_counters()  # Count every envelope (including errors)
+                        state.increment_error_counter()
                         state.log_error(error_type, max_val)
                         page.pubsub.send_all_on_topic(TOPIC_EVENT, None)
                         page.pubsub.send_all_on_topic(TOPIC_COUNTERS, None)
@@ -345,14 +352,21 @@ def main(page: ft.Page):
         visible=state.config.get("system_override", False),
     )
 
-    # Counter labels
-    lbl_session_count = ft.Text(f"Session: {state.session_count}", size=14, weight=ft.FontWeight.BOLD)
-    lbl_total_count = ft.Text(f"Total: {state.config.get('total_count', 0)}", size=14, weight=ft.FontWeight.BOLD)
+    # Counter labels - Good cards
+    lbl_session_good = ft.Text(f"Session: {state.session_good_count}", size=14, weight=ft.FontWeight.BOLD)
+    lbl_total_good = ft.Text(f"Total: {state.config.get('total_good_count', 0)}", size=14, weight=ft.FontWeight.BOLD)
 
-    def reset_session_count(_):
-        state.session_count = 0
-        lbl_session_count.value = f"Session: {state.session_count}"
-        lbl_session_count.update()
+    # Counter labels - Errors
+    lbl_session_error = ft.Text(f"Session: {state.session_error_count}", size=14, weight=ft.FontWeight.BOLD)
+    lbl_total_error = ft.Text(f"Total: {state.config.get('total_error_count', 0)}", size=14, weight=ft.FontWeight.BOLD)
+
+    def reset_session_counts(_):
+        state.session_good_count = 0
+        state.session_error_count = 0
+        lbl_session_good.value = f"Session: {state.session_good_count}"
+        lbl_session_error.value = f"Session: {state.session_error_count}"
+        lbl_session_good.update()
+        lbl_session_error.update()
 
     # Configuration fields
     txt_threshold = ft.TextField(
@@ -514,29 +528,52 @@ def main(page: ft.Page):
                 )
             ]),
             ft.Container(height=10),
-            # Counters row
+            # Counters row - Good cards and Errors separated
             ft.Container(
                 content=ft.Row([
+                    # Good cards counter
                     ft.Container(
-                        content=ft.Row([
-                            ft.Icon(ft.Icons.NUMBERS, size=16, color=ft.Colors.BLUE_300),
-                            lbl_session_count,
-                            ft.IconButton(ft.Icons.REFRESH, icon_size=14, on_click=reset_session_count, tooltip="Reset session"),
-                        ]),
-                        bgcolor=ft.Colors.with_opacity(0.1, ft.Colors.BLUE),
-                        padding=ft.padding.symmetric(horizontal=10, vertical=5),
+                        content=ft.Column([
+                            ft.Text("GOOD", size=10, color=ft.Colors.GREEN_300, weight=ft.FontWeight.BOLD),
+                            ft.Row([
+                                ft.Icon(ft.Icons.CHECK_CIRCLE, size=16, color=ft.Colors.GREEN_300),
+                                lbl_session_good,
+                            ]),
+                            ft.Row([
+                                ft.Icon(ft.Icons.INVENTORY, size=14, color=ft.Colors.GREEN_200),
+                                lbl_total_good,
+                            ]),
+                        ], spacing=2),
+                        bgcolor=ft.Colors.with_opacity(0.1, ft.Colors.GREEN),
+                        padding=ft.padding.symmetric(horizontal=15, vertical=8),
                         border_radius=5,
                     ),
+                    # Error counter
                     ft.Container(
-                        content=ft.Row([
-                            ft.Icon(ft.Icons.INVENTORY, size=16, color=ft.Colors.PURPLE_300),
-                            lbl_total_count,
-                        ]),
-                        bgcolor=ft.Colors.with_opacity(0.1, ft.Colors.PURPLE),
-                        padding=ft.padding.symmetric(horizontal=10, vertical=5),
+                        content=ft.Column([
+                            ft.Text("ERRORS", size=10, color=ft.Colors.RED_300, weight=ft.FontWeight.BOLD),
+                            ft.Row([
+                                ft.Icon(ft.Icons.ERROR, size=16, color=ft.Colors.RED_300),
+                                lbl_session_error,
+                            ]),
+                            ft.Row([
+                                ft.Icon(ft.Icons.INVENTORY, size=14, color=ft.Colors.RED_200),
+                                lbl_total_error,
+                            ]),
+                        ], spacing=2),
+                        bgcolor=ft.Colors.with_opacity(0.1, ft.Colors.RED),
+                        padding=ft.padding.symmetric(horizontal=15, vertical=8),
                         border_radius=5,
                     ),
-                ], spacing=20),
+                    # Reset button for both session counters
+                    ft.IconButton(
+                        ft.Icons.REFRESH,
+                        icon_size=20,
+                        on_click=reset_session_counts,
+                        tooltip="Reset session counters",
+                        icon_color=ft.Colors.GREY_400,
+                    ),
+                ], spacing=20, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ),
             ft.Container(height=10),
             ft.Text("LIVE SENSOR DATA", size=12, weight=ft.FontWeight.BOLD),
@@ -704,10 +741,14 @@ def main(page: ft.Page):
         update_error_list()
 
     def on_counters_update(topic, message):
-        lbl_session_count.value = f"Session: {state.session_count}"
-        lbl_total_count.value = f"Total: {state.config.get('total_count', 0)}"
-        lbl_session_count.update()
-        lbl_total_count.update()
+        lbl_session_good.value = f"Session: {state.session_good_count}"
+        lbl_total_good.value = f"Total: {state.config.get('total_good_count', 0)}"
+        lbl_session_error.value = f"Session: {state.session_error_count}"
+        lbl_total_error.value = f"Total: {state.config.get('total_error_count', 0)}"
+        lbl_session_good.update()
+        lbl_total_good.update()
+        lbl_session_error.update()
+        lbl_total_error.update()
 
     # Subscribe to specific topics
     page.pubsub.subscribe_topic(TOPIC_STATUS, on_status_update)
