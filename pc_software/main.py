@@ -213,8 +213,10 @@ def serial_handler(page: ft.Page):
                         state.last_error = f"STOP: {error_type} (max={max_val})"
                         state.last_event = state.last_error
                         state.stop_active = True
+                        state.increment_counters()  # Count every envelope (including errors)
                         state.log_error(error_type, max_val)
                         page.pubsub.send_all_on_topic(TOPIC_EVENT, None)
+                        page.pubsub.send_all_on_topic(TOPIC_COUNTERS, None)
                         page.pubsub.send_all_on_topic(TOPIC_ERROR_HISTORY, None)
 
                 if time.time() - last_ping > 1.0:
@@ -325,7 +327,7 @@ def main(page: ft.Page):
     btn_resume = ft.Container(
         content=btn_resume_text,
         bgcolor=ft.Colors.GREEN,
-        padding=ft.padding.symmetric(horizontal=20, vertical=10),
+        padding=ft.Padding.symmetric(horizontal=20, vertical=10),
         border_radius=5,
         on_click=on_resume_clicked,
         ink=True,
@@ -351,12 +353,6 @@ def main(page: ft.Page):
         state.session_count = 0
         lbl_session_count.value = f"Session: {state.session_count}"
         lbl_session_count.update()
-
-    def reset_total_count(_):
-        state.config["total_count"] = 0
-        state.save_config()
-        lbl_total_count.value = f"Total: {state.config.get('total_count', 0)}"
-        lbl_total_count.update()
 
     # Configuration fields
     txt_threshold = ft.TextField(
@@ -407,7 +403,7 @@ def main(page: ft.Page):
             ft.DropdownOption(key="warn", text="Errors Only"),
             ft.DropdownOption(key="info", text="All Events"),
         ],
-        on_change=on_log_level_change
+        on_select=on_log_level_change
     )
 
     txt_floor = ft.TextField(
@@ -535,7 +531,6 @@ def main(page: ft.Page):
                         content=ft.Row([
                             ft.Icon(ft.Icons.INVENTORY, size=16, color=ft.Colors.PURPLE_300),
                             lbl_total_count,
-                            ft.IconButton(ft.Icons.REFRESH, icon_size=14, on_click=reset_total_count, tooltip="Reset total"),
                         ]),
                         bgcolor=ft.Colors.with_opacity(0.1, ft.Colors.PURPLE),
                         padding=ft.padding.symmetric(horizontal=10, vertical=5),
