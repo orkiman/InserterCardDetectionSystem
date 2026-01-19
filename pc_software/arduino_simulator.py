@@ -1,5 +1,6 @@
 import flet as ft
 import serial
+import serial.tools.list_ports
 import threading
 import time
 import random
@@ -10,6 +11,7 @@ class ArduinoSimulator:
         self.cfg_floor_value = 100
         self.cfg_card_threshold = 150
         self.cfg_reverse_sensor = False
+        self.cfg_system_override = False
 
         # State
         self.running = True
@@ -82,15 +84,22 @@ class ArduinoSimulator:
             status = "Enabled" if self.cfg_reverse_sensor else "Disabled"
             self.send_message(f"MSG:Reverse Sensor {status}")
 
+        if cmd.startswith("SET_OVERRIDE:"):
+            val = int(cmd.split(":")[1])
+            self.cfg_system_override = (val == 1)
+            status = "ENABLED - Safety bypassed!" if self.cfg_system_override else "Disabled"
+            self.send_message(f"MSG:System Override {status}")
+
     def simulate_logic(self):
         """Simulate Arduino state machine logic"""
         # Check sensor range (50-1000 absolute range, only trigger once)
-        if self.manual_adc < 50 or self.manual_adc > 1000:
-            if not self.machine_stop_active:
-                self.machine_stop_active = True
-                self.send_message("LOG:ERR:SENSOR_OUT_OF_RANGE")
-                self.send_message("ERR:SENSOR_OUT_OF_RANGE")
-            return
+        # Skip if system override is enabled
+        if not self.cfg_system_override:
+            if self.manual_adc < 50 or self.manual_adc > 1000:
+                if not self.machine_stop_active:
+                    self.machine_stop_active = True
+                    self.send_message("ERR:SENSOR_OUT_OF_RANGE")
+                return
 
         # State machine
         if self.state_idle and self.envelope_present:
@@ -106,11 +115,17 @@ class ArduinoSimulator:
         if not self.state_idle and not self.envelope_present:
             # Envelope finished, validate
             if self.max_peak_in_window >= self.cfg_card_threshold:
-                self.send_message("EVT:PASS")
+                # PASS: Card detected - include max value
+                self.send_message(f"EVT:PASS:{self.max_peak_in_window}")
             else:
-                self.machine_stop_active = True
-                self.send_message("LOG:ERR:EMPTY_ENVELOPE")
-                self.send_message("ERR:EMPTY_ENVELOPE")
+                # FAIL: Peak was below threshold (Empty Envelope)
+                if self.cfg_system_override:
+                    # Override enabled - report as pass anyway with max value
+                    self.send_message(f"EVT:PASS_OVERRIDE:{self.max_peak_in_window}")
+                else:
+                    # Include max value in error for debugging
+                    self.send_message(f"ERR:EMPTY_ENVELOPE:{self.max_peak_in_window}")
+                    self.machine_stop_active = True
 
             self.state_idle = True
             self.max_peak_in_window = 0
@@ -200,11 +215,35 @@ def main(page: ft.Page):
     status_text = ft.Text("Not Connected", size=16, color=ft.Colors.RED)
 
     # Port selection
-    port_input = ft.TextField(
-        label="Virtual COM Port",
-        value="COM3",
-        width=150,
-        hint_text="e.g., COM3"
+    def get_serial_ports():
+        """Get list of available serial ports"""
+        ports = serial.tools.list_ports.comports()
+        return [port.device for port in ports]
+
+    def refresh_ports(e=None):
+        """Refresh the port dropdown options"""
+        ports = get_serial_ports()
+        port_dropdown.options = [ft.dropdown.Option(p) for p in ports]
+        if ports:
+            port_dropdown.value = ports[0]
+        else:
+            port_dropdown.value = None
+        port_dropdown.update()
+
+    port_dropdown = ft.Dropdown(
+        label="Serial Port",
+        width=200,
+        options=[ft.dropdown.Option(p) for p in get_serial_ports()],
+    )
+    # Set initial value if ports available
+    initial_ports = get_serial_ports()
+    if initial_ports:
+        port_dropdown.value = initial_ports[0]
+
+    btn_refresh = ft.IconButton(
+        icon=ft.Icons.REFRESH,
+        tooltip="Refresh ports",
+        on_click=refresh_ports
     )
 
     def update_status(msg):
@@ -217,7 +256,10 @@ def main(page: ft.Page):
 
     def connect_clicked(e):
         if btn_connect.content.value == "Connect":
-            if sim.connect(port_input.value, update_status):
+            if not port_dropdown.value:
+                update_status("No port selected")
+                return
+            if sim.connect(port_dropdown.value, update_status):
                 btn_connect.content.value = "Disconnect"
                 btn_connect.bgcolor = ft.Colors.RED
                 # Start serial thread
@@ -279,31 +321,14 @@ def main(page: ft.Page):
     )
 
     # Output indicators
-    ind_stop = ft.Container(
-        content=ft.Text("STOP OUTPUT", color=ft.Colors.WHITE, size=12),
+    ind_enable = ft.Container(
+        content=ft.Text("ENABLE OUTPUT", color=ft.Colors.WHITE, size=12),
         bgcolor=ft.Colors.GREEN,
         padding=10,
         border_radius=5,
         width=150,
         alignment=ft.Alignment(0, 0)
     )
-
-    # Update indicators thread
-    def update_indicators():
-        while sim.running:
-            if sim.machine_stop_active:
-                ind_stop.bgcolor = ft.Colors.RED
-            else:
-                ind_stop.bgcolor = ft.Colors.GREEN
-
-            try:
-                ind_stop.update()
-            except:
-                pass
-
-            time.sleep(0.1)
-
-    threading.Thread(target=update_indicators, daemon=True).start()
 
     # Configuration display
     lbl_config = ft.Text(
@@ -312,24 +337,25 @@ def main(page: ft.Page):
         color=ft.Colors.GREY_500
     )
 
-    def update_config():
-        while sim.running:
-            reverse_str = "ON" if sim.cfg_reverse_sensor else "OFF"
-            lbl_config.value = f"Floor: {sim.cfg_floor_value} | Threshold: {sim.cfg_card_threshold} | Reverse: {reverse_str}"
-            try:
-                lbl_config.update()
-            except:
-                pass
-            time.sleep(0.5)
-
-    threading.Thread(target=update_config, daemon=True).start()
-
     # State display
     lbl_state = ft.Text("State: IDLE", size=14, color=ft.Colors.CYAN)
     lbl_peak = ft.Text("Peak in Window: 0", size=12, color=ft.Colors.GREY_400)
 
-    def update_state_display():
+    # Single update thread for all UI elements
+    def update_ui():
         while sim.running:
+            # Update enable indicator
+            if sim.machine_stop_active:
+                ind_enable.bgcolor = ft.Colors.RED
+            else:
+                ind_enable.bgcolor = ft.Colors.GREEN
+
+            # Update config display
+            reverse_str = "ON" if sim.cfg_reverse_sensor else "OFF"
+            override_str = "ON" if sim.cfg_system_override else "OFF"
+            lbl_config.value = f"Floor: {sim.cfg_floor_value} | Threshold: {sim.cfg_card_threshold} | Reverse: {reverse_str} | Override: {override_str}"
+
+            # Update state display
             state_str = "IDLE" if sim.state_idle else "MEASURING"
             if sim.machine_stop_active:
                 state_str = "FAULT"
@@ -337,14 +363,13 @@ def main(page: ft.Page):
             lbl_peak.value = f"Peak in Window: {sim.max_peak_in_window}"
 
             try:
-                lbl_state.update()
-                lbl_peak.update()
+                page.update()
             except:
                 pass
 
             time.sleep(0.1)
 
-    threading.Thread(target=update_state_display, daemon=True).start()
+    threading.Thread(target=update_ui, daemon=True).start()
 
     # Layout
     page.add(
@@ -354,7 +379,7 @@ def main(page: ft.Page):
                 ft.Divider(),
 
                 # Connection
-                ft.Row([port_input, btn_connect]),
+                ft.Row([port_dropdown, btn_refresh, btn_connect]),
                 status_text,
                 ft.Divider(),
 
@@ -382,7 +407,7 @@ def main(page: ft.Page):
 
                 # Outputs
                 ft.Text("Outputs", size=18, weight=ft.FontWeight.BOLD),
-                ind_stop,
+                ind_enable,
 
             ], spacing=10),
             padding=20
