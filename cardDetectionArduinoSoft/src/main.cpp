@@ -15,6 +15,7 @@ const int PIN_ENABLE_OUT  = 8;   // Digital Output: Machine Enable Signal
 // These can be updated via Serial commands
 int CFG_FLOOR_VALUE       = 100; // Floor ADC value (50-500 valid range)
 int CFG_CARD_THRESHOLD    = 150; // Below this = empty envelope (error)
+int CFG_CARD_UPPER_THRESHOLD = 800; // Above this = double card (error)
 bool CFG_REVERSE_SENSOR   = false; // Reverse sensor signal (1023 - ADC)
 bool CFG_SYSTEM_OVERRIDE  = false; // Bypass all error detection
 const long WATCHDOG_TIMEOUT = 2000; // Time in ms before stopping if no PC Ping
@@ -188,22 +189,33 @@ void loop() {
 // ------------------------------------------------------------
 
 void validateResult() {
-  // Logic: Check if peak is above threshold
-  // If below threshold = empty envelope (no card)
+  // Logic: Check if peak is within valid range
+  // Below lower threshold = empty envelope (no card)
+  // Above upper threshold = double card
 
-  if (maxPeakInWindow >= CFG_CARD_THRESHOLD) {
-    // PASS: Card detected - include max value
+  if (maxPeakInWindow >= CFG_CARD_THRESHOLD && maxPeakInWindow <= CFG_CARD_UPPER_THRESHOLD) {
+    // PASS: Card detected within valid range
     Serial.print("EVT:PASS:");
     Serial.println(maxPeakInWindow);
-  } else {
+  } else if (maxPeakInWindow < CFG_CARD_THRESHOLD) {
     // FAIL: Peak was below threshold (Empty Envelope)
     if (CFG_SYSTEM_OVERRIDE) {
-      // Override enabled - report as pass anyway with max value
       Serial.print("EVT:PASS_OVERRIDE:");
       Serial.println(maxPeakInWindow);
     } else {
-      // Include max value in error for debugging
       Serial.print("ERR:EMPTY_ENVELOPE:");
+      Serial.println(maxPeakInWindow);
+      machineStopActive = true;
+      currentState = STATE_FAULT;
+      digitalWrite(PIN_ENABLE_OUT, LOW);
+    }
+  } else {
+    // FAIL: Peak was above upper threshold (Double Card)
+    if (CFG_SYSTEM_OVERRIDE) {
+      Serial.print("EVT:PASS_OVERRIDE:");
+      Serial.println(maxPeakInWindow);
+    } else {
+      Serial.print("ERR:DOUBLE_CARD:");
       Serial.println(maxPeakInWindow);
       machineStopActive = true;
       currentState = STATE_FAULT;
@@ -248,13 +260,23 @@ void processCommand(String cmd) {
     return;
   }
 
-  // Configuration: Set Threshold (e.g., "SET_THR:150")
+  // Configuration: Set Lower Threshold (e.g., "SET_THR:150")
   if (cmd.startsWith("SET_THR:")) {
     int val = cmd.substring(8).toInt();
     if (val > 0 && val <= 1023) {
       CFG_CARD_THRESHOLD = val;
       Serial.print("MSG:Card Threshold Set to ");
       Serial.println(CFG_CARD_THRESHOLD);
+    }
+  }
+
+  // Configuration: Set Upper Threshold (e.g., "SET_THR_UPPER:800")
+  if (cmd.startsWith("SET_THR_UPPER:")) {
+    int val = cmd.substring(14).toInt();
+    if (val > 0 && val <= 1023) {
+      CFG_CARD_UPPER_THRESHOLD = val;
+      Serial.print("MSG:Card Upper Threshold Set to ");
+      Serial.println(CFG_CARD_UPPER_THRESHOLD);
     }
   }
 

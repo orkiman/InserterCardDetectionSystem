@@ -17,6 +17,7 @@ DEFAULT_CONFIG = {
     "floor_value": 100,
     "factor": 0.01,
     "envelope_card_threshold": 150,
+    "envelope_card_upper_threshold": 800,  # Above this = double card (error)
     "reverse_sensor": False,
     "system_override": False,
     "log_level": "warn",  # "info" = log all, "warn" = log errors only
@@ -159,6 +160,8 @@ def serial_handler(page: ft.Page):
                     ser.write(f"SET_FLOOR:{state.config['floor_value']}\n".encode())
                     time.sleep(0.1)
                     ser.write(f"SET_THR:{state.config['envelope_card_threshold']}\n".encode())
+                    time.sleep(0.1)
+                    ser.write(f"SET_THR_UPPER:{state.config.get('envelope_card_upper_threshold', 800)}\n".encode())
                     time.sleep(0.1)
                     reverse_val = 1 if state.config.get('reverse_sensor', False) else 0
                     ser.write(f"SET_REVERSE:{reverse_val}\n".encode())
@@ -370,10 +373,17 @@ def main(page: ft.Page):
 
     # Configuration fields
     txt_threshold = ft.TextField(
-        label="Envelope + Card Threshold (ADC)",
+        label="Lower Threshold (ADC)",
         value=str(state.config["envelope_card_threshold"]),
         width=250,
         helper="Below this = empty envelope (error)"
+    )
+
+    txt_upper_threshold = ft.TextField(
+        label="Upper Threshold (ADC)",
+        value=str(state.config.get("envelope_card_upper_threshold", 800)),
+        width=250,
+        helper="Above this = double card (error)"
     )
 
     def on_reverse_change(e):
@@ -441,16 +451,19 @@ def main(page: ft.Page):
             floor_val = int(txt_floor.value)
             factor_val = float(txt_factor.value)
             threshold_val = int(txt_threshold.value)
+            upper_threshold_val = int(txt_upper_threshold.value)
 
             state.config["floor_value"] = floor_val
             state.config["factor"] = factor_val
             state.config["envelope_card_threshold"] = threshold_val
+            state.config["envelope_card_upper_threshold"] = upper_threshold_val
             state.config["reverse_sensor"] = chk_reverse.value
             state.config["system_override"] = chk_system_override.value
             state.save_config()
 
             send_command(f"SET_FLOOR:{floor_val}")
             send_command(f"SET_THR:{threshold_val}")
+            send_command(f"SET_THR_UPPER:{upper_threshold_val}")
             send_command(f"SET_REVERSE:{1 if chk_reverse.value else 0}")
             send_command(f"SET_OVERRIDE:{1 if chk_system_override.value else 0}")
 
@@ -603,8 +616,8 @@ def main(page: ft.Page):
 
         ft.Text("Validation Logic", size=20, weight=ft.FontWeight.BOLD),
         ft.Container(height=10),
-        txt_threshold,
-        ft.Text("Maximum ADC value for empty envelope detection (triggers error if below)",
+        ft.Row([txt_threshold, txt_upper_threshold], spacing=20),
+        ft.Text("Lower: empty envelope if below  |  Upper: double card if above",
                 size=12, color=ft.Colors.GREY_500),
         ft.Container(height=15),
         chk_reverse,
