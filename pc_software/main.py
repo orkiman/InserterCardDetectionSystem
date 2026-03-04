@@ -18,12 +18,14 @@ DEFAULT_CONFIG = {
     "factor": 0.01,
     "envelope_card_threshold": 150,
     "envelope_card_upper_threshold": 800,  # Above this = double card (error)
-    "reverse_sensor": False,
+    "reverse_sensor": True,
     "system_override": False,
     "log_level": "warn",  # "info" = log all, "warn" = log errors only
     "total_good_count": 0,  # Persistent good envelope count
     "total_error_count": 0  # Persistent error envelope count
 }
+
+VERSION = "2026-03-04 11:11"
 
 # PubSub Topics
 TOPIC_STATUS = "status"
@@ -69,6 +71,7 @@ class AppState:
                         return new_config
                     config = DEFAULT_CONFIG.copy()
                     config.update(loaded_config)
+                    config["reverse_sensor"] = True
                     return config
             except:
                 pass
@@ -292,10 +295,10 @@ def main(page: ft.Page):
         page.update()
 
     # Main display labels
-    lbl_mm = ft.Text("0.00 mm", size=60, weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE_200)
-    lbl_raw = ft.Text("ADC: 0", size=20, color=ft.Colors.GREY_500)
-    lbl_error = ft.Text("", size=16, color=ft.Colors.RED, visible=False)
-    lbl_event = ft.Text("System Ready", size=25, weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN)
+    lbl_mm = ft.Text("0.00 mm", size=46, weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE_200)
+    lbl_raw = ft.Text("ADC: 0", size=16, color=ft.Colors.GREY_500)
+    lbl_error = ft.Text("", size=14, color=ft.Colors.RED, visible=False)
+    lbl_event = ft.Text("System Ready", size=20, weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN)
 
     # Chart
     chart_data = [fc.LineChartData(
@@ -372,47 +375,101 @@ def main(page: ft.Page):
         lbl_session_error.update()
 
     # Configuration fields
+    def on_threshold_change(e):
+        try:
+            val = int(e.control.value)
+            state.config["envelope_card_threshold"] = val
+            state.save_config()
+            send_command(f"SET_THR:{val}")
+        except ValueError:
+            pass
+
+    def on_upper_threshold_change(e):
+        try:
+            val = int(e.control.value)
+            state.config["envelope_card_upper_threshold"] = val
+            state.save_config()
+            send_command(f"SET_THR_UPPER:{val}")
+        except ValueError:
+            pass
+
     txt_threshold = ft.TextField(
-        label="Lower Threshold (ADC)",
         value=str(state.config["envelope_card_threshold"]),
-        width=250,
-        helper="Below this = empty envelope (error)"
+        width=90,
+        text_size=18,
+        on_change=on_threshold_change
     )
 
     txt_upper_threshold = ft.TextField(
-        label="Upper Threshold (ADC)",
         value=str(state.config.get("envelope_card_upper_threshold", 800)),
-        width=250,
-        helper="Above this = double card (error)"
+        width=90,
+        text_size=18,
+        on_change=on_upper_threshold_change
     )
-
-    def on_reverse_change(e):
-        state.config["reverse_sensor"] = e.control.value
-        state.save_config()
-        send_command(f"SET_REVERSE:{1 if e.control.value else 0}")
 
     chk_reverse = ft.Checkbox(
         label="Reverse Sensor Signal (1023 - ADC)",
-        value=state.config.get("reverse_sensor", False),
-        on_change=on_reverse_change
+        value=True,
+        disabled=True,
     )
 
+    # Password dialog components for system override
+    override_password_field = ft.TextField(label="Password", password=True, width=250, autofocus=True)
+    override_password_error = ft.Text("", color=ft.Colors.RED, size=12)
+
     def on_override_change(e):
-        state.config["system_override"] = e.control.value
-        state.save_config()
-        send_command(f"SET_OVERRIDE:{1 if e.control.value else 0}")
-        # Update override warning visibility
-        lbl_override_warning.visible = e.control.value
-        lbl_override_warning.update()
-        # If enabling override, clear error and resume
         if e.control.value:
-            on_resume_clicked(None)
+            override_password_field.value = ""
+            override_password_error.value = ""
+            override_dialog.open = True
+            page.update()
+        else:
+            state.config["system_override"] = False
+            state.save_config()
+            send_command("SET_OVERRIDE:0")
+            lbl_override_warning.visible = False
+            lbl_override_warning.update()
 
     chk_system_override = ft.Checkbox(
         label="System Override (bypass error detection)",
         value=state.config.get("system_override", False),
         on_change=on_override_change
     )
+
+    def on_override_password_confirm(e):
+        if override_password_field.value == "NO PROTECTION":
+            override_dialog.open = False
+            state.config["system_override"] = True
+            state.save_config()
+            send_command("SET_OVERRIDE:1")
+            lbl_override_warning.visible = True
+            lbl_override_warning.update()
+            on_resume_clicked(None)
+        else:
+            override_password_error.value = "Incorrect password!"
+            chk_system_override.value = False
+        page.update()
+
+    def on_override_password_cancel(e):
+        override_dialog.open = False
+        chk_system_override.value = False
+        page.update()
+
+    override_dialog = ft.AlertDialog(
+        modal=True,
+        title=ft.Text("System Override"),
+        content=ft.Column([
+            ft.Text("Enter password to enable System Override:"),
+            override_password_field,
+            override_password_error,
+            ft.Text("Password: NO PROTECTION", size=11, color=ft.Colors.GREY_500, italic=True),
+        ], tight=True, width=300),
+        actions=[
+            ft.TextButton("Confirm", on_click=on_override_password_confirm),
+            ft.TextButton("Cancel", on_click=on_override_password_cancel),
+        ],
+    )
+    page.overlay.append(override_dialog)
 
     # Log level dropdown
     def on_log_level_change(e):
@@ -520,6 +577,7 @@ def main(page: ft.Page):
 
     # Dashboard tab
     tab_dashboard = ft.Container(
+        expand=True,
         content=ft.Column([
             lbl_override_warning,
             ft.Row([
@@ -527,77 +585,78 @@ def main(page: ft.Page):
                     content=ft.Column([
                         ft.Text("CURRENT HEIGHT", size=12, color=ft.Colors.GREY_400),
                         lbl_mm,
-                        lbl_raw,
-                        lbl_error
-                    ]),
+                        ft.Row([lbl_raw, lbl_error], spacing=10),
+                    ], spacing=2),
                     expand=True,
                 ),
                 ft.Container(
                     content=ft.Column([
                         ft.Text("STATUS", size=12, color=ft.Colors.GREY_400),
+                        ft.Row([
+                            ft.Text("max (double card)", size=18, color=ft.Colors.GREY_400),
+                            txt_upper_threshold,
+                        ], alignment=ft.MainAxisAlignment.END, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                         lbl_event,
-                        btn_resume
+                        ft.Row([
+                            ft.Text("min (no card)", size=18, color=ft.Colors.GREY_400),
+                            txt_threshold,
+                        ], alignment=ft.MainAxisAlignment.END, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                     ], horizontal_alignment=ft.CrossAxisAlignment.END),
                 )
             ]),
-            ft.Container(height=10),
-            # Counters row - Good cards and Errors separated
-            ft.Container(
-                content=ft.Row([
-                    # Good cards counter
-                    ft.Container(
-                        content=ft.Column([
-                            ft.Text("GOOD", size=10, color=ft.Colors.GREEN_300, weight=ft.FontWeight.BOLD),
-                            ft.Row([
-                                ft.Icon(ft.Icons.CHECK_CIRCLE, size=16, color=ft.Colors.GREEN_300),
-                                lbl_session_good,
-                            ]),
-                            ft.Row([
-                                ft.Icon(ft.Icons.INVENTORY, size=14, color=ft.Colors.GREEN_200),
-                                lbl_total_good,
-                            ]),
-                        ], spacing=2),
-                        bgcolor=ft.Colors.with_opacity(0.1, ft.Colors.GREEN),
-                        padding=ft.padding.symmetric(horizontal=15, vertical=8),
-                        border_radius=5,
-                    ),
-                    # Error counter
-                    ft.Container(
-                        content=ft.Column([
-                            ft.Text("ERRORS", size=10, color=ft.Colors.RED_300, weight=ft.FontWeight.BOLD),
-                            ft.Row([
-                                ft.Icon(ft.Icons.ERROR, size=16, color=ft.Colors.RED_300),
-                                lbl_session_error,
-                            ]),
-                            ft.Row([
-                                ft.Icon(ft.Icons.INVENTORY, size=14, color=ft.Colors.RED_200),
-                                lbl_total_error,
-                            ]),
-                        ], spacing=2),
-                        bgcolor=ft.Colors.with_opacity(0.1, ft.Colors.RED),
-                        padding=ft.padding.symmetric(horizontal=15, vertical=8),
-                        border_radius=5,
-                    ),
-                    # Reset button for both session counters
-                    ft.IconButton(
-                        ft.Icons.REFRESH,
-                        icon_size=20,
-                        on_click=reset_session_counts,
-                        tooltip="Reset session counters",
-                        icon_color=ft.Colors.GREY_400,
-                    ),
-                ], spacing=20, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            ),
-            ft.Container(height=10),
+            # Counters + Resume Machine on same row
+            ft.Row([
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("GOOD", size=10, color=ft.Colors.GREEN_300, weight=ft.FontWeight.BOLD),
+                        ft.Row([
+                            ft.Icon(ft.Icons.CHECK_CIRCLE, size=16, color=ft.Colors.GREEN_300),
+                            lbl_session_good,
+                        ]),
+                        ft.Row([
+                            ft.Icon(ft.Icons.INVENTORY, size=14, color=ft.Colors.GREEN_200),
+                            lbl_total_good,
+                        ]),
+                    ], spacing=2),
+                    bgcolor=ft.Colors.with_opacity(0.1, ft.Colors.GREEN),
+                    padding=ft.padding.symmetric(horizontal=10, vertical=4),
+                    border_radius=5,
+                ),
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("ERRORS", size=10, color=ft.Colors.RED_300, weight=ft.FontWeight.BOLD),
+                        ft.Row([
+                            ft.Icon(ft.Icons.ERROR, size=16, color=ft.Colors.RED_300),
+                            lbl_session_error,
+                        ]),
+                        ft.Row([
+                            ft.Icon(ft.Icons.INVENTORY, size=14, color=ft.Colors.RED_200),
+                            lbl_total_error,
+                        ]),
+                    ], spacing=2),
+                    bgcolor=ft.Colors.with_opacity(0.1, ft.Colors.RED),
+                    padding=ft.padding.symmetric(horizontal=10, vertical=4),
+                    border_radius=5,
+                ),
+                ft.IconButton(
+                    ft.Icons.REFRESH,
+                    icon_size=20,
+                    on_click=reset_session_counts,
+                    tooltip="Reset session counters",
+                    icon_color=ft.Colors.GREY_400,
+                ),
+                ft.Container(expand=True),
+                btn_resume,
+            ], spacing=10, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ft.Container(height=5),
             ft.Text("LIVE SENSOR DATA", size=12, weight=ft.FontWeight.BOLD),
             ft.Container(
                 content=chart,
-                height=250,
+                expand=True,
                 bgcolor=ft.Colors.with_opacity(0.05, ft.Colors.WHITE),
                 border_radius=10,
                 padding=10
             ),
-            ft.Container(height=10),
             ft.Text("EVENT LOG (Last 10)", size=12, weight=ft.FontWeight.BOLD),
             ft.Container(
                 content=error_list,
@@ -605,7 +664,7 @@ def main(page: ft.Page):
                 border_radius=10,
                 padding=10
             )
-        ])
+        ], expand=True)
     )
 
     # Settings tab
@@ -616,10 +675,6 @@ def main(page: ft.Page):
 
         ft.Text("Validation Logic", size=20, weight=ft.FontWeight.BOLD),
         ft.Container(height=10),
-        ft.Row([txt_threshold, txt_upper_threshold], spacing=20),
-        ft.Text("Lower: empty envelope if below  |  Upper: double card if above",
-                size=12, color=ft.Colors.GREY_500),
-        ft.Container(height=15),
         chk_reverse,
         ft.Text("Enable if sensor is installed upside-down (inverts ADC reading)",
                 size=12, color=ft.Colors.GREY_500),
@@ -704,7 +759,10 @@ def main(page: ft.Page):
     page.on_keyboard_event = on_keyboard
 
     page.add(
-        ft.Row([status_icon, status_text], alignment=ft.MainAxisAlignment.END),
+        ft.Row([
+            ft.Text(f"v{VERSION}", size=11, color=ft.Colors.GREY_600),
+            ft.Row([status_icon, status_text]),
+        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
         tabs,
     )
 
